@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: Magnify
+    orgId: 1
+    folder: Magnify
+    type: file
+    disableDeletion: true
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
