@@ -1,1 +1,2 @@
 # magnify-app
+test
