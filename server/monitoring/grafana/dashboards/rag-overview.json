@@ -1,0 +1,628 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, strategy) (rate(magnify_ingestion_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50 {{strategy}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, strategy) (rate(magnify_ingestion_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95 {{strategy}}",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, strategy) (rate(magnify_ingestion_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99 {{strategy}}",
+          "refId": "C"
+        }
+      ],
+      "title": "Indexing duration p50 / p95 / p99",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, strategy, stage) (rate(magnify_ingestion_stage_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{strategy}} / {{stage}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Indexing stage duration p95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "id": 3,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, provider, strategy) (rate(magnify_chat_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50 {{provider}} / {{strategy}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, provider, strategy) (rate(magnify_chat_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95 {{provider}} / {{strategy}}",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, provider, strategy) (rate(magnify_chat_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99 {{provider}} / {{strategy}}",
+          "refId": "C"
+        }
+      ],
+      "title": "Chat response duration p50 / p95 / p99",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "id": 4,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, provider, strategy, operation) (rate(magnify_model_call_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50 {{provider}} / {{strategy}} / {{operation}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, provider, strategy, operation) (rate(magnify_model_call_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95 {{provider}} / {{strategy}} / {{operation}}",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, provider, strategy, operation) (rate(magnify_model_call_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99 {{provider}} / {{strategy}} / {{operation}}",
+          "refId": "C"
+        }
+      ],
+      "title": "Model call duration p50 / p95 / p99",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "id": 5,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "sum by (strategy, outcome) (increase(magnify_ingestion_jobs_total[1h]))",
+          "legendFormat": "{{strategy}} / {{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Indexing jobs (last hour)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "id": 6,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, strategy) (rate(magnify_worker_queue_wait_seconds_bucket[5m])))",
+          "legendFormat": "p50 {{strategy}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, strategy) (rate(magnify_worker_queue_wait_seconds_bucket[5m])))",
+          "legendFormat": "p95 {{strategy}}",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, strategy) (rate(magnify_worker_queue_wait_seconds_bucket[5m])))",
+          "legendFormat": "p99 {{strategy}}",
+          "refId": "C"
+        }
+      ],
+      "title": "Worker queue wait p50 / p95 / p99",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "id": 7,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "magnify_worker_active_jobs",
+          "legendFormat": "{{service}} / {{strategy}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Active indexing jobs",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "id": 8,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "sum by (strategy, unit) (increase(magnify_ingestion_units_total[1h]))",
+          "legendFormat": "{{strategy}} / {{unit}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Indexed documents, pages, and passages",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "id": 9,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "sum by (operation_type, outcome) (rate(magnify_graphql_operations_total[5m]))",
+          "legendFormat": "{{operation_type}} / {{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "title": "GraphQL operation rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "id": 10,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, operation_type) (rate(magnify_graphql_operation_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{operation_type}}",
+          "refId": "A"
+        }
+      ],
+      "title": "GraphQL operation latency p95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+      "id": 11,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "sum by (operation_type, phase) (rate(magnify_graphql_errors_total[5m]))",
+          "legendFormat": "{{operation_type}} / {{phase}}",
+          "refId": "A"
+        }
+      ],
+      "title": "GraphQL error rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
+      "id": 12,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "magnify_graphql_active_requests",
+          "legendFormat": "{{service}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Active GraphQL requests",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 48 },
+      "id": 13,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, strategy, stage) (rate(magnify_ingestion_stage_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50 {{strategy}} / {{stage}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, strategy, stage) (rate(magnify_ingestion_stage_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95 {{strategy}} / {{stage}}",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, strategy, stage) (rate(magnify_ingestion_stage_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99 {{strategy}} / {{stage}}",
+          "refId": "C"
+        }
+      ],
+      "title": "Ingestion stage latency p50 / p95 / p99",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 48 },
+      "id": 14,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, system, operation) (rate(magnify_dependency_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50 {{system}} / {{operation}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, system, operation) (rate(magnify_dependency_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95 {{system}} / {{operation}}",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, system, operation) (rate(magnify_dependency_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99 {{system}} / {{operation}}",
+          "refId": "C"
+        }
+      ],
+      "title": "Database, storage, and model dependency latency",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "B" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 56 },
+      "id": 15,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, system, operation, direction) (rate(magnify_dependency_payload_bytes_bucket[5m])))",
+          "legendFormat": "p95 {{system}} / {{operation}} / {{direction}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Dependency payload size p95 (database JSON vs storage transfer)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 56 },
+      "id": 16,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, strategy) (rate(magnify_worker_job_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50 {{strategy}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, strategy) (rate(magnify_worker_job_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95 {{strategy}}",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, strategy) (rate(magnify_worker_job_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99 {{strategy}}",
+          "refId": "C"
+        }
+      ],
+      "title": "Worker processing latency (queue wait excluded)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 64 },
+      "id": 17,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "sum by (strategy) (increase(magnify_worker_job_retries_total[1h]))",
+          "legendFormat": "retries {{strategy}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (system, operation, outcome) (rate(magnify_dependency_calls_total[5m]))",
+          "legendFormat": "{{system}} / {{operation}} / {{outcome}}",
+          "refId": "B"
+        },
+        {
+          "expr": "sum by (strategy, stage) (rate(magnify_ingestion_stage_errors_total[5m]))",
+          "legendFormat": "ingestion error {{strategy}} / {{stage}}",
+          "refId": "C"
+        },
+        {
+          "expr": "sum by (strategy, stage) (rate(magnify_chat_stage_errors_total[5m]))",
+          "legendFormat": "chat error {{strategy}} / {{stage}}",
+          "refId": "D"
+        },
+        {
+          "expr": "sum by (strategy, outcome) (rate(magnify_worker_job_attempts_total[5m]))",
+          "legendFormat": "worker attempt {{strategy}} / {{outcome}}",
+          "refId": "E"
+        }
+      ],
+      "title": "Retries and dependency call rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 64 },
+      "id": 18,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "sum by (operation, outcome) (rate(magnify_vector_operations_total[5m]))",
+          "legendFormat": "{{operation}} / {{outcome}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (strategy, operation, outcome) (rate(magnify_model_calls_total[5m]))",
+          "legendFormat": "model {{strategy}} / {{operation}} / {{outcome}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Vector and model calls (Index Tree has no vector calls)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "B" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 72 },
+      "id": 19,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(magnify_index_tree_serialized_bytes_bucket[5m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(magnify_index_tree_serialized_bytes_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(magnify_index_tree_serialized_bytes_bucket[5m])))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "title": "Serialized Index Tree payload bytes",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "B" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 72 },
+      "id": 20,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(magnify_upload_bytes_total{operation=\"accepted\"}[1h]))",
+          "legendFormat": "PDF bytes accepted (last hour)",
+          "refId": "A"
+        }
+      ],
+      "title": "PDF transfer bytes (not allocated storage usage)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "decbytes" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 80 },
+      "id": 21,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "process_resident_memory_bytes",
+          "legendFormat": "RSS {{service}}",
+          "refId": "A"
+        }
+      ],
+      "title": "API and worker resident memory",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 80 },
+      "id": 22,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "rate(process_cpu_user_seconds_total[5m])",
+          "legendFormat": "CPU user seconds/s {{service}}",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(process_cpu_system_seconds_total[5m])",
+          "legendFormat": "CPU system seconds/s {{service}}",
+          "refId": "B"
+        }
+      ],
+      "title": "API and worker CPU utilization",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 88 },
+      "id": 23,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(magnify_index_tree_nodes_bucket[5m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(magnify_index_tree_nodes_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(magnify_index_tree_nodes_bucket[5m])))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "title": "Index Tree node count",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 88 },
+      "id": 24,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(magnify_chat_evidence_count_bucket{strategy=\"vector\",phase=\"retrieved\"}[5m])))",
+          "legendFormat": "p50 retrieved",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(magnify_chat_evidence_count_bucket{strategy=\"vector\",phase=\"retrieved\"}[5m])))",
+          "legendFormat": "p95 retrieved",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(magnify_chat_evidence_count_bucket{strategy=\"vector\",phase=\"retrieved\"}[5m])))",
+          "legendFormat": "p99 retrieved",
+          "refId": "C"
+        }
+      ],
+      "title": "Raw Vector retrieval result counts",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 96 },
+      "id": 25,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "sum by (operation) (rate(magnify_vector_embedding_estimated_tokens_total[5m]))",
+          "legendFormat": "estimated Gemini tokens/s {{operation}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (strategy, operation, direction) (rate(magnify_model_tokens_total[5m]))",
+          "legendFormat": "reported model tokens/s {{strategy}} / {{operation}} / {{direction}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Embedding estimates and reported model tokens",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "15s",
+  "schemaVersion": 41,
+  "tags": ["magnify", "rag", "benchmarking"],
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Magnify RAG Overview",
+  "uid": "magnify-rag-overview",
+  "version": 1
+}

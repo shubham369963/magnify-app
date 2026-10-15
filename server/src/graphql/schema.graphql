@@ -1,0 +1,115 @@
+scalar JSON
+
+enum DocumentProcessingStatus {
+  pending
+  processing
+  completed
+  failed
+}
+
+enum MessageRole {
+  user
+  assistant
+}
+
+type Project {
+  id: ID!
+  owner_clerk_id: String!
+  name: String!
+  description: String
+  rag_strategy: String!
+  created_at: String!
+  updated_at: String!
+}
+
+type ProjectDocument {
+  id: ID!
+  project_id: ID!
+  owner_clerk_id: String!
+  file_name: String!
+  mime_type: String!
+  file_size: Float!
+  checksum: String
+  processing_status: DocumentProcessingStatus!
+  processing_error: String
+  created_at: String!
+  updated_at: String!
+}
+
+type Conversation {
+  id: ID!
+  project_id: ID!
+  owner_clerk_id: String!
+  title: String!
+  created_at: String!
+  updated_at: String!
+}
+
+type ChatMessage {
+  id: ID!
+  conversation_id: ID!
+  role: MessageRole!
+  content: String!
+  sequence_number: Float!
+  metadata: JSON!
+  created_at: String!
+}
+
+type ChatSource {
+  documentId: ID
+  source: String
+  page: Int
+  sourceOrder: Int
+  sectionTitle: String
+  contentType: String
+  content: String!
+  excerpt: String
+  previewUrl: String
+}
+
+type ProjectIndexTreeStatus {
+  project_id: ID!
+  status: String!
+  generation: Float!
+  progress: Float
+  error_message: String
+  updated_at: String!
+}
+
+type ChatResponse {
+  message: String!
+  ragStrategy: String!
+  inputTokens: Float
+  outputTokens: Float
+  sources: [ChatSource!]!
+}
+
+type UploadStatus {
+  jobId: ID!
+  status: String!
+  progress: JSON
+  error: String
+}
+
+type Query {
+  projects(limit: Int, offset: Int): [Project!]!
+  project(projectId: ID!): Project!
+  documents(projectId: ID!, limit: Int, offset: Int): [ProjectDocument!]!
+  conversations(projectId: ID!, limit: Int, offset: Int): [Conversation!]!
+  conversation(projectId: ID!, conversationId: ID!): Conversation!
+  messages(projectId: ID!, conversationId: ID!): [ChatMessage!]!
+  uploadStatus(jobId: ID!): UploadStatus!
+  projectIndexTreeStatus(projectId: ID!): ProjectIndexTreeStatus
+}
+
+type Mutation {
+  createProject(name: String!, description: String): Project!
+  updateProject(projectId: ID!, name: String, description: String, ragStrategy: String): Project!
+  reindexProjectTree(projectId: ID!): Boolean!
+  deleteProject(projectId: ID!): Boolean!
+  deleteDocument(projectId: ID!, documentId: ID!): Boolean!
+  createConversation(projectId: ID!, title: String): Conversation!
+  updateConversation(projectId: ID!, conversationId: ID!, title: String!): Conversation!
+  deleteConversation(projectId: ID!, conversationId: ID!): Boolean!
+  sendMessage(projectId: ID!, conversationId: ID!, message: String!): ChatResponse!
+}
