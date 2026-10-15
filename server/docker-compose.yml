@@ -1,0 +1,116 @@
+name: pdf-rag-nest
+
+x-backend-environment: &backend-environment
+  REDIS_HOST: valkey
+  REDIS_PORT: "6379"
+  QDRANT_URL: http://qdrant:6333
+  GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+  OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
+  OLLAMA_CLOUD_BASE_URL: ${OLLAMA_CLOUD_BASE_URL:-https://ollama.com}
+  OLLAMA_CLOUD_CHAT_MODEL: ${OLLAMA_CLOUD_CHAT_MODEL:-gemma4:31b}
+  OLLAMA_CLOUD_VISION_MODEL: ${OLLAMA_CLOUD_VISION_MODEL:-gemma4:31b}
+  RAG_MIN_RELEVANCE_SCORE: ${RAG_MIN_RELEVANCE_SCORE:-0.45}
+  METRICS_SERVICE_NAME: magnify-api
+  WORKER_METRICS_PORT: "9464"
+  CLERK_JWKS_URL: ${CLERK_JWKS_URL:-}
+  CLERK_ISSUER: ${CLERK_ISSUER:-}
+  CLERK_AUDIENCE: ${CLERK_AUDIENCE:-}
+  SUPABASE_URL: ${SUPABASE_URL:-}
+  SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-}
+  SUPABASE_STORAGE_BUCKET: ${SUPABASE_STORAGE_BUCKET:-documents}
+
+x-backend: &backend
+  image: pdf-rag-nest-backend:local
+  build: .
+  init: true
+  restart: unless-stopped
+  environment: *backend-environment
+  volumes:
+    - uploads:/app/uploads
+  depends_on:
+    valkey:
+      condition: service_healthy
+    qdrant:
+      condition: service_started
+
+services:
+  api:
+    <<: *backend
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  worker:
+    <<: *backend
+    command: ["node", "dist/worker-node/worker.js"]
+    environment:
+      <<: *backend-environment
+      METRICS_SERVICE_NAME: magnify-worker
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      api:
+        condition: service_healthy
+      worker:
+        condition: service_started
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "127.0.0.1:3003:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
+  valkey:
+    image: valkey/valkey:8
+    restart: unless-stopped
+    command: ["valkey-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "127.0.0.1:6381:6379"
+    volumes:
+      - valkey-data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  qdrant:
+    image: qdrant/qdrant:v1.15.5
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6335:6333"
+    volumes:
+      - qdrant-data:/qdrant/storage
+
+volumes:
+  uploads:
+  valkey-data:
+  qdrant-data:
+  prometheus-data:
+  grafana-data:
