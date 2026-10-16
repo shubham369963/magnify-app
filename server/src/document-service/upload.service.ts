@@ -14,6 +14,16 @@ import { getTraceContext } from '../observability/trace-context.js';
 import { metrics } from '../observability/metrics.js';
 import { deleteVectorIndexCheckpoint } from './vector-index-checkpoint.js';
 
+const DEFAULT_MAX_PDF_SIZE_BYTES = 3 * 1024 * 1024;
+const configuredMaxPdfSizeBytes = process.env.MAX_PDF_SIZE_BYTES?.trim();
+export const MAX_PDF_SIZE_BYTES = configuredMaxPdfSizeBytes
+  ? Number(configuredMaxPdfSizeBytes)
+  : DEFAULT_MAX_PDF_SIZE_BYTES;
+if (!Number.isSafeInteger(MAX_PDF_SIZE_BYTES) || MAX_PDF_SIZE_BYTES < 1) {
+  throw new Error('MAX_PDF_SIZE_BYTES must be a positive integer.');
+}
+const maxPdfSizeLabel = `${Number((MAX_PDF_SIZE_BYTES / (1024 * 1024)).toFixed(2))} MB`;
+
 interface ProjectIndexTreeStatus {
   project_id: string;
   status: 'pending' | 'processing' | 'completed' | 'failed';
@@ -60,7 +70,9 @@ export class UploadService implements OnModuleDestroy {
 
   private async performUpload(file: Express.Multer.File | undefined, ownerId: string, projectId: string) {
     if (!file?.buffer?.length) throw new BadRequestException('A PDF file is required.');
-    if (file.size > 25 * 1024 * 1024) throw new BadRequestException('PDF files may not exceed 25 MB.');
+    if (file.size >= MAX_PDF_SIZE_BYTES || file.buffer.length >= MAX_PDF_SIZE_BYTES) {
+      throw new BadRequestException(`PDF files must be smaller than ${maxPdfSizeLabel}.`);
+    }
     if (file.buffer.subarray(0, 5).toString('ascii') !== '%PDF-') {
       throw new BadRequestException('The uploaded file is not a valid PDF.');
     }

@@ -20,6 +20,16 @@ import { UPLOAD_PROJECT_INDEX_STATUS_QUERY } from "../lib/graphql/queries/upload
 import { UPLOAD_STATUS_QUERY } from "../lib/graphql/queries/upload-status";
 import { formatDuration } from "../lib/format-duration";
 
+const DEFAULT_MAX_PDF_SIZE_BYTES = 3 * 1024 * 1024;
+const configuredMaxPdfSizeBytes = process.env.NEXT_PUBLIC_MAX_PDF_SIZE_BYTES?.trim();
+const MAX_PDF_SIZE_BYTES = configuredMaxPdfSizeBytes
+  ? Number(configuredMaxPdfSizeBytes)
+  : DEFAULT_MAX_PDF_SIZE_BYTES;
+if (!Number.isSafeInteger(MAX_PDF_SIZE_BYTES) || MAX_PDF_SIZE_BYTES < 1) {
+  throw new Error("NEXT_PUBLIC_MAX_PDF_SIZE_BYTES must be a positive integer.");
+}
+const maxPdfSizeLabel = `${Number((MAX_PDF_SIZE_BYTES / (1024 * 1024)).toFixed(2))} MB`;
+
 interface FileUploadProps {
   projectId: string;
   ragStrategy: "vector" | "index_tree";
@@ -154,12 +164,20 @@ export default function FileUpload({ projectId, ragStrategy, getToken, onUploade
     );
     const rejected = selected.filter((file) => !accepted.includes(file));
     if (rejected.length) setError(`${rejected.map((file) => file.name).join(", ")}: select PDF files only.`);
-    if (!accepted.length) {
+    const oversized = accepted.filter((file) => file.size >= MAX_PDF_SIZE_BYTES);
+    const validFiles = accepted.filter((file) => file.size < MAX_PDF_SIZE_BYTES);
+    if (oversized.length) {
+      setError((current) => [
+        current,
+        `${oversized.map((file) => file.name).join(", ")}: each PDF must be smaller than ${maxPdfSizeLabel}.`,
+      ].filter(Boolean).join(" "));
+    }
+    if (!validFiles.length) {
       if (inputRef.current) inputRef.current.value = "";
       return;
     }
     setUploading(true);
-    const batch = accepted.map((file, index) => ({
+    const batch = validFiles.map((file, index) => ({
       file,
       key: `${Date.now()}-${index}-${file.name}`,
     }));

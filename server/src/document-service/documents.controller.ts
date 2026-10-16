@@ -7,7 +7,7 @@ import { memoryStorage } from 'multer';
 import { ClerkAuthGuard } from '../auth/auth.guard.js';
 import type { AuthenticatedRequest } from '../auth/authenticated-request.js';
 import { DocumentsService } from './documents.service.js';
-import { UploadService } from './upload.service.js';
+import { MAX_PDF_SIZE_BYTES, UploadService } from './upload.service.js';
 
 @Controller()
 @UseGuards(ClerkAuthGuard)
@@ -21,7 +21,7 @@ export class DocumentsController {
   @HttpCode(202)
   @UseInterceptors(FileInterceptor('pdf', {
     storage: memoryStorage(),
-    limits: { fileSize: 25 * 1024 * 1024, files: 1 },
+    limits: { fileSize: MAX_PDF_SIZE_BYTES, files: 1 },
   }))
   upload(
     @Req() request: AuthenticatedRequest,
