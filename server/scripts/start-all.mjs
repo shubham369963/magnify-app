@@ -57,6 +57,8 @@ if (mode === "api") {
   mkdirSync("/tmp/prometheus", { recursive: true });
   mkdirSync("/tmp/grafana/log", { recursive: true });
   mkdirSync("/tmp/grafana/plugins", { recursive: true });
+  mkdirSync("/app/server/monitoring/grafana/provisioning-render/plugins", { recursive: true });
+  mkdirSync("/app/server/monitoring/grafana/provisioning-render/alerting", { recursive: true });
 
   const redisUrl = process.env.REDIS_URL || "redis://127.0.0.1:6379";
   const redis = new URL(redisUrl);
