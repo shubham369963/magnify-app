@@ -44,63 +44,22 @@ jobs:
         run: gh release create "$GITHUB_REF_NAME" --generate-notes
 
   deploy:
-    name: Deploy release commit to Render
+    name: Trigger Render deploy
     needs: [checks, publish]
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 5
     steps:
       - name: Trigger Render deploy
-        id: render-deploy
         env:
-          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
-          RENDER_SERVICE_ID: ${{ vars.RENDER_SERVICE_ID }}
-          DEPLOY_COMMIT_SHA: ${{ github.sha }}
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
         run: |
           set -euo pipefail
-          if [[ -z "$RENDER_API_KEY" || -z "$RENDER_SERVICE_ID" ]]; then
-            echo "Set the RENDER_API_KEY secret and RENDER_SERVICE_ID Actions variable."
+          if [[ -z "$RENDER_DEPLOY_HOOK_URL" ]]; then
+            echo "Set the RENDER_DEPLOY_HOOK_URL Actions secret."
             exit 1
           fi
 
-          response="$(curl --fail --silent --show-error --max-time 30 \
-            -X POST \
-            -H "Authorization: Bearer $RENDER_API_KEY" \
-            -H 'Accept: application/json' \
-            -H 'Content-Type: application/json' \
-            --data "$(jq -n --arg commitId "$DEPLOY_COMMIT_SHA" '{commitId: $commitId}')" \
-            "https://api.render.com/v1/services/${RENDER_SERVICE_ID}/deploys")"
-          deploy_id="$(jq -r '.id // empty' <<< "$response")"
-          if [[ -z "$deploy_id" ]]; then
-            echo "Render did not return a deploy ID."
-            exit 1
-          fi
-          echo "deploy_id=$deploy_id" >> "$GITHUB_OUTPUT"
-
-      - name: Wait for Render deploy
-        env:
-          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
-          RENDER_SERVICE_ID: ${{ vars.RENDER_SERVICE_ID }}
-          RENDER_DEPLOY_ID: ${{ steps.render-deploy.outputs.deploy_id }}
-        run: |
-          set -euo pipefail
-          deadline=$((SECONDS + 1200))
-          while (( SECONDS < deadline )); do
-            deploy="$(curl --fail --silent --show-error --max-time 15 \
-              -H "Authorization: Bearer $RENDER_API_KEY" \
-              -H 'Accept: application/json' \
-              "https://api.render.com/v1/services/${RENDER_SERVICE_ID}/deploys/${RENDER_DEPLOY_ID}")"
-            status="$(jq -r '.status // empty' <<< "$deploy")"
-
-            if [[ "$status" == live ]]; then
-              echo "Render deploy $RENDER_DEPLOY_ID is live."
-              exit 0
-            fi
-            if [[ "$status" == build_failed || "$status" == update_failed || "$status" == canceled || "$status" == pre_deploy_failed ]]; then
-              echo "Render deploy $RENDER_DEPLOY_ID failed with status: $status"
-              exit 1
-            fi
-            echo "Render deploy status is '${status:-unknown}'; retrying."
-            sleep 15
-          done
-          echo "Render deploy $RENDER_DEPLOY_ID did not become live before timeout."
-          exit 1
+          curl --fail --silent --show-error --max-time 30 \
+            -X POST "$RENDER_DEPLOY_HOOK_URL" \
+            --output /dev/null
+          echo "Render deploy hook accepted the release-triggered deployment."
