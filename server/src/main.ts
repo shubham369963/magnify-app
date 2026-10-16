@@ -16,8 +16,20 @@ async function bootstrap() {
       ? incomingTraceId
       : randomUUID();
     const requestId = randomUUID();
+    const startedAt = Date.now();
     response.setHeader('x-trace-id', traceId);
     response.setHeader('x-request-id', requestId);
+    response.once('finish', () => {
+      if (request.path === '/metrics') return;
+      logger.log(JSON.stringify({
+        event: 'api.request',
+        method: request.method,
+        status: response.statusCode,
+        durationMs: Date.now() - startedAt,
+        traceId,
+        requestId,
+      }));
+    });
     runWithTraceContext({ traceId, requestId }, next);
   });
   app.enableCors();

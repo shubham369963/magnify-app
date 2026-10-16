@@ -106,6 +106,7 @@ if (mode === "api") {
         GF_SERVER_DOMAIN: grafanaDomain,
         GF_SERVER_ROOT_URL: grafanaRootUrl,
         GF_SERVER_SERVE_FROM_SUB_PATH: "true",
+        GF_SECURITY_CSRF_TRUSTED_ORIGINS: grafanaDomain,
         GF_SECURITY_ADMIN_USER: process.env.GRAFANA_ADMIN_USER,
         GF_SECURITY_ADMIN_PASSWORD: process.env.GRAFANA_ADMIN_PASSWORD,
         GF_USERS_ALLOW_SIGN_UP: "false",
