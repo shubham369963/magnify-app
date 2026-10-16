@@ -9,10 +9,12 @@ export const metadata: Metadata = {
   description: "Manage research projects, documents, and conversations in Magnify.",
 };
 
+export const dynamic = "force-dynamic";
+
 export default function RootLayout({ children }: LayoutProps<"/">) {
   const clerkConfigured = Boolean(process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY && process.env.CLERK_SECRET_KEY);
   const content = clerkConfigured ? (
-    <ClerkProvider>
+    <ClerkProvider publishableKey={process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}>
       <SignedIn>{children}</SignedIn>
       <SignedOut><AuthenticationPrompt /></SignedOut>
     </ClerkProvider>

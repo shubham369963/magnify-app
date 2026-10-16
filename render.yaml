@@ -1,14 +1,5 @@
 services:
-  # Private Redis-compatible queue used by the API and worker.
-  - type: keyvalue
-    name: magnify-redis
-    region: oregon
-    plan: 256mb
-    maxmemoryPolicy: noeviction
-    persistenceMode: journal-snapshot
-    ipAllowList: []
-
-  # Public NestJS API. Uploaded PDFs and vectors live in Supabase and Qdrant.
+  # One public service runs the UI, API, worker, and local monitoring processes.
   - type: web
     name: magnify-api
     runtime: docker
@@ -16,24 +7,22 @@ services:
     region: oregon
     plan: 0.5c-512mb
     dockerfilePath: ./server/Dockerfile
-    dockerContext: ./server
-    # Start the HTTP API on the port configured by APP_PORT.
-    dockerCommand: node dist/main.js
+    dockerContext: .
+    dockerCommand: node server/scripts/start-all.mjs
     autoDeployTrigger: checksPass
     healthCheckPath: /
     maxShutdownDelaySeconds: 120
     envVars:
       - key: APP_PORT
-        value: "10000"
+        value: "8000"
+      - key: REDIS_URL
+        value: redis://127.0.0.1:6379
+      - key: WORKER_METRICS_PORT
+        value: "9464"
       - key: MAX_PDF_SIZE_BYTES
         value: "3145728"
       - key: METRICS_SERVICE_NAME
         value: magnify-api
-      - key: REDIS_URL
-        fromService:
-          type: keyvalue
-          name: magnify-redis
-          property: connectionString
       - fromGroup: magnify-runtime
       - key: QDRANT_URL
         sync: false
@@ -53,71 +42,15 @@ services:
         sync: false
       - key: PDF_INDEX_CHECKPOINT_DIR
         value: /app/uploads/.vector-index-checkpoints
-
-  # Background PDF ingestion and indexing process.
-  - type: worker
-    name: magnify-worker
-    runtime: docker
-    branch: main
-    region: oregon
-    plan: 0.5c-512mb
-    dockerfilePath: ./server/Dockerfile
-    dockerContext: ./server
-    # Start the BullMQ PDF ingestion worker.
-    dockerCommand: node dist/worker-node/worker.js
-    autoDeployTrigger: checksPass
-    maxShutdownDelaySeconds: 120
-    envVars:
-      - key: REDIS_URL
-        fromService:
-          type: keyvalue
-          name: magnify-redis
-          property: connectionString
-      - fromGroup: magnify-runtime
-      - key: QDRANT_URL
-        sync: false
-      - key: QDRANT_API_KEY
-        sync: false
-      - key: GOOGLE_API_KEY
-        sync: false
-      - key: OLLAMA_API_KEY
-        sync: false
-      - key: SUPABASE_URL
-        sync: false
-      - key: SUPABASE_SERVICE_ROLE_KEY
-        sync: false
-      - key: WORKER_METRICS_PORT
-        value: "9464"
-      - key: METRICS_SERVICE_NAME
-        value: magnify-worker
-
-  # Next.js frontend; its server-side rewrite calls the API over Render's private network.
-  - type: web
-    name: magnify-web
-    runtime: node
-    rootDir: client
-    branch: main
-    region: oregon
-    plan: 0.5c-512mb
-    # Install frontend dependencies and produce the Next.js production bundle.
-    buildCommand: corepack enable && yarn install --frozen-lockfile --non-interactive && yarn build
-    # Bind the production frontend server to Render's assigned port.
-    startCommand: yarn next start --hostname 0.0.0.0 --port $PORT
-    autoDeployTrigger: checksPass
-    healthCheckPath: /
-    envVars:
-      - key: NODE_VERSION
-        value: "22.14.0"
       - key: NEXT_PUBLIC_MAX_PDF_SIZE_BYTES
         value: "3145728"
-      - key: NEST_API_HOSTPORT
-        fromService:
-          type: web
-          name: magnify-api
-          property: hostport
       - key: NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
         sync: false
       - key: CLERK_SECRET_KEY
+        sync: false
+      - key: GRAFANA_ADMIN_USER
+        sync: false
+      - key: GRAFANA_ADMIN_PASSWORD
         sync: false
 
 envVarGroups:

@@ -39,7 +39,9 @@ x-backend-environment: &backend-environment
 
 x-backend: &backend
   image: pdf-rag-nest-backend:local
-  build: .
+  build:
+    context: ..
+    dockerfile: server/Dockerfile
   init: true
   restart: unless-stopped
   environment: *backend-environment
@@ -54,6 +56,7 @@ x-backend: &backend
 services:
   api:
     <<: *backend
+    command: ["node", "server/dist/main.js"]
     environment:
       <<: *backend-environment
       APP_PORT: ${APP_PORT:-8000}
@@ -68,7 +71,7 @@ services:
 
   worker:
     <<: *backend
-    command: ["node", "dist/worker-node/worker.js"]
+    command: ["node", "server/dist/worker-node/worker.js"]
     environment:
       <<: *backend-environment
       METRICS_SERVICE_NAME: magnify-worker
