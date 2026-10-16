@@ -9,7 +9,7 @@ services:
     dockerfilePath: ./server/Dockerfile
     dockerContext: .
     dockerCommand: node server/scripts/start-all.mjs
-    autoDeployTrigger: checksPass
+    autoDeployTrigger: "off"
     healthCheckPath: /
     maxShutdownDelaySeconds: 120
     envVars:

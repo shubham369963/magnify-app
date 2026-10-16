@@ -42,24 +42,3 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" --generate-notes
-
-  deploy:
-    name: Trigger Render deploy
-    needs: [checks, publish]
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Trigger Render deploy
-        env:
-          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
-        run: |
-          set -euo pipefail
-          if [[ -z "$RENDER_DEPLOY_HOOK_URL" ]]; then
-            echo "Set the RENDER_DEPLOY_HOOK_URL Actions secret."
-            exit 1
-          fi
-
-          curl --fail --silent --show-error --max-time 30 \
-            -X POST "$RENDER_DEPLOY_HOOK_URL" \
-            --output /dev/null
-          echo "Render deploy hook accepted the release-triggered deployment."
