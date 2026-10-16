@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import CheckCircleOutlineRounded from "@mui/icons-material/CheckCircleOutlineRounded";
+import CloseRounded from "@mui/icons-material/CloseRounded";
 import ErrorOutlineRounded from "@mui/icons-material/ErrorOutlineRounded";
 import CloudUploadOutlined from "@mui/icons-material/CloudUploadOutlined";
 import InsertDriveFileOutlined from "@mui/icons-material/InsertDriveFileOutlined";
@@ -11,6 +12,7 @@ import {
   Button,
   Chip,
   CircularProgress,
+  IconButton,
   Paper,
   Stack,
   Typography,
@@ -232,6 +234,16 @@ export default function FileUpload({ projectId, ragStrategy, getToken, onUploade
               {item.status === "completed" ? <CheckCircleOutlineRounded color="success" fontSize="small" /> : item.status === "failed" ? <ErrorOutlineRounded color="error" fontSize="small" /> : item.status === "uploading" || item.status === "processing" ? <CircularProgress size={16} /> : <InsertDriveFileOutlined color="action" fontSize="small" />}
               <Typography variant="body2" title={item.fileName} noWrap sx={{ minWidth: 0, flex: 1 }}>{item.fileName}</Typography>
               <Chip size="small" variant="outlined" label={item.status} color={item.status === "completed" ? "success" : item.status === "failed" ? "error" : "default"} />
+              {(item.status === "completed" || item.status === "failed") && (
+                <IconButton
+                  size="small"
+                  aria-label={`Dismiss ${item.fileName} upload status`}
+                  title="Dismiss upload status"
+                  onClick={() => setUploads((current) => current.filter((upload) => upload.key !== item.key))}
+                >
+                  <CloseRounded fontSize="small" />
+                </IconButton>
+              )}
             </Stack>
             {(item.uploadDurationMs !== undefined || item.indexDurationMs !== undefined) && (
               <Stack direction="row" spacing={1.25} sx={{ mt: 0.5, flexWrap: "wrap" }}>

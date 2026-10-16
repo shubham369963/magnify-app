@@ -28,7 +28,9 @@ export function createQdrantClient() {
 
 export async function deleteDocumentVectors(documentId: string): Promise<void> {
   try {
-    await createQdrantClient().delete(collectionName, {
+    const client = createQdrantClient();
+    await ensureQdrantPayloadIndexes(client);
+    await client.delete(collectionName, {
       filter: { must: [{ key: 'metadata.document_id', match: { value: documentId } }] },
     });
   } catch (error) {
@@ -44,7 +46,9 @@ export async function deleteDocumentVectors(documentId: string): Promise<void> {
 
 export async function deleteUserVectors(ownerId: string): Promise<void> {
   try {
-    await createQdrantClient().delete(collectionName, {
+    const client = createQdrantClient();
+    await ensureQdrantPayloadIndexes(client);
+    await client.delete(collectionName, {
       filter: { must: [{ key: 'metadata.owner_clerk_id', match: { value: ownerId } }] },
     });
   } catch (error) {

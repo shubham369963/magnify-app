@@ -136,7 +136,7 @@ export default function ProjectDetail({ projectId }: { projectId: string }) {
         undefined,
         [`project:${projectId}`, `workspace:${projectId}`],
       ),
-      cachedBackendGraphqlRequest<{ documents: ProjectDocument[] }>(
+      backendGraphqlRequest<{ documents: ProjectDocument[] }>(
         getToken,
         `
         query Documents($projectId: ID!, $limit: Int, $offset: Int) {
@@ -146,9 +146,6 @@ export default function ProjectDetail({ projectId }: { projectId: string }) {
         }
       `,
         { projectId, limit: 100, offset: 0 },
-        userId ?? "signed-out",
-        undefined,
-        [`documents:${projectId}`, `workspace:${projectId}`],
       ),
       cachedBackendGraphqlRequest<{ conversations: Conversation[] }>(
         getToken,
