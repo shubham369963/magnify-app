@@ -69,6 +69,10 @@ if (mode === "api") {
     REDIS_URL: redisUrl,
     WORKER_METRICS_PORT: "9464",
   };
+  const grafanaDomain = process.env.RENDER_EXTERNAL_HOSTNAME || "localhost";
+  const grafanaRootUrl = process.env.RENDER_EXTERNAL_HOSTNAME
+    ? `https://${grafanaDomain}/grafana/`
+    : `http://${grafanaDomain}:3003/grafana/`;
 
   if (localRedis) {
     start("Redis", "redis-server", [
@@ -99,7 +103,8 @@ if (mode === "api") {
         ...process.env,
         GF_SERVER_HTTP_ADDR: "127.0.0.1",
         GF_SERVER_HTTP_PORT: "3003",
-        GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/grafana/",
+        GF_SERVER_DOMAIN: grafanaDomain,
+        GF_SERVER_ROOT_URL: grafanaRootUrl,
         GF_SERVER_SERVE_FROM_SUB_PATH: "true",
         GF_SECURITY_ADMIN_USER: process.env.GRAFANA_ADMIN_USER,
         GF_SECURITY_ADMIN_PASSWORD: process.env.GRAFANA_ADMIN_PASSWORD,
