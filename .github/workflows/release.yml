@@ -27,6 +27,14 @@ jobs:
           fetch-depth: 0
       - name: Verify release tag resolves to this commit
         run: test "$(git rev-parse "$GITHUB_REF_NAME^{commit}")" = "$GITHUB_SHA"
+      - name: Skip if release already exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists and will not be modified."
+            exit 0
+          fi
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
