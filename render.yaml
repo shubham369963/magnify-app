@@ -12,12 +12,11 @@ services:
   - type: web
     name: magnify-api
     runtime: docker
-    rootDir: server
     branch: main
     region: oregon
     plan: 0.5c-512mb
-    dockerfilePath: ./Dockerfile
-    dockerContext: .
+    dockerfilePath: ./server/Dockerfile
+    dockerContext: ./server
     # Start the HTTP API on the port configured by APP_PORT.
     dockerCommand: node dist/main.js
     autoDeployTrigger: checksPass
@@ -59,12 +58,11 @@ services:
   - type: worker
     name: magnify-worker
     runtime: docker
-    rootDir: server
     branch: main
     region: oregon
     plan: 0.5c-512mb
-    dockerfilePath: ./Dockerfile
-    dockerContext: .
+    dockerfilePath: ./server/Dockerfile
+    dockerContext: ./server
     # Start the BullMQ PDF ingestion worker.
     dockerCommand: node dist/worker-node/worker.js
     autoDeployTrigger: checksPass
