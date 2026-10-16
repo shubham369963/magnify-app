@@ -1,9 +1,32 @@
 import assert from "node:assert/strict";
-import { jest, test } from "@jest/globals";
+import { afterEach, beforeEach, jest, test } from "@jest/globals";
 import { ChatOllama } from "@langchain/ollama";
 import { QdrantVectorStore } from "@langchain/qdrant";
 import { ChatService } from "../../dist/chat-service/chat.service.js";
 import { GeminiEmbeddings } from "../../dist/config/gemini-embeddings.js";
+
+const geminiEmbeddingSettings = {
+  GEMINI_EMBEDDING_MODEL: "gemini-embedding-2",
+  GEMINI_EMBEDDING_DIMENSIONS: "768",
+  GEMINI_EMBEDDING_BATCH_SIZE: "100",
+  GEMINI_EMBEDDING_MAX_ATTEMPTS: "3",
+  GEMINI_EMBEDDING_REQUEST_TIMEOUT_MS: "60000",
+  GEMINI_EMBEDDING_RETRY_DELAY_MS: "250",
+  GEMINI_EMBEDDING_RATE_LIMIT_RETRY_DELAY_MS: "15000",
+  GEMINI_EMBEDDING_RATE_LIMIT_MAX_DELAY_MS: "60000",
+  GEMINI_EMBEDDING_MAX_RETRY_AFTER_MS: "120000",
+};
+const previousGeminiEmbeddingSettings = Object.fromEntries(
+  Object.keys(geminiEmbeddingSettings).map((key) => [key, process.env[key]]),
+);
+
+beforeEach(() => Object.assign(process.env, geminiEmbeddingSettings));
+afterEach(() => {
+  for (const [key, value] of Object.entries(previousGeminiEmbeddingSettings)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+});
 
 function createChatService(conversations, documents, projects, supabase) {
   conversations.getInVerifiedProject = conversations.get;
