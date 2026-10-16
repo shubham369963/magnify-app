@@ -9,15 +9,16 @@
     "start:worker": "node --env-file=.env dist/worker-node/worker.js",
     "dev": "yarn docker:infra && node --env-file=.env --import tsx --watch src/main.ts",
     "dev:worker": "yarn docker:infra && node --env-file=.env --import tsx --watch src/worker-node/worker.ts",
-    "dev:all": "yarn docker:up",
-    "dev:all:local": "yarn docker:infra && concurrently --kill-others-on-fail --names server,worker \"node --env-file=.env --import tsx --watch src/main.ts\" \"node --env-file=.env --import tsx --watch src/worker-node/worker.ts\"",
-    "docker:infra": "docker compose up -d --wait valkey qdrant",
+    "docker:infra": "docker compose -f docker-compose.infra.yml up -d --wait valkey qdrant",
     "docker:up": "docker compose up -d --build --wait api worker prometheus grafana",
     "docker:down": "docker compose down",
     "docker:logs": "docker compose logs -f api worker",
     "test": "yarn build && yarn test:unit",
     "test:unit": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --runInBand",
     "test:performance": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --runInBand src/document-service/pdf-chunking.performance.spec.js",
+    "check:env": "node scripts/check-env-templates.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check:schema": "node --input-type=module -e \"import { buildSchema } from 'graphql'; import { readFileSync } from 'node:fs'; buildSchema(readFileSync('src/graphql/schema.graphql', 'utf8')); console.log('GraphQL schema is valid.');\"",
     "reindex": "node --env-file=.env dist/database/reindex.js",
     "migrate": "node --env-file=.env --import tsx src/database/migrate.ts"
   },
@@ -59,5 +60,8 @@
   "engines": {
     "node": ">=20.19.0"
   },
-  "packageManager": "yarn@1.22.10"
+  "packageManager": "yarn@1.22.10",
+  "resolutions": {
+    "strip-ansi": "6.0.1"
+  }
 }

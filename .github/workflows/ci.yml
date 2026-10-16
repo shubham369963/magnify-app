@@ -2,10 +2,40 @@ name: CI
 
 on:
   push:
+    branches: ["**"]
   pull_request:
   workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
+  deployment-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+      - name: Validate deployment YAML syntax
+        run: >-
+          ruby -e 'require "yaml"; ARGV.each { |path| YAML.load_file(path, aliases: true); puts "valid YAML: #{path}" }'
+          render.yaml server/docker-compose.yml server/docker-compose.infra.yml
+          .github/workflows/ci.yml .github/workflows/cd.yml .github/workflows/release.yml
+      - name: Ensure env templates contain no credentials
+        run: |
+          if grep -Eq '^(REDIS_URL|QDRANT_API_KEY|GOOGLE_API_KEY|OLLAMA_API_KEY|CLERK_SECRET_KEY|CLERK_WEBHOOK_SIGNING_SECRET|SUPABASE_SERVICE_ROLE_KEY|DATABASE_URL|GRAFANA_ADMIN_USER|GRAFANA_ADMIN_PASSWORD)=.+' server/.env.example client/.env.example; then
+            echo "Secret values must not be committed in env templates."
+            exit 1
+          fi
+          for env_file in server/.env client/.env; do
+            if git ls-files --error-unmatch "$env_file" >/dev/null 2>&1; then
+              echo "Real env files must not be tracked: $env_file"
+              exit 1
+            fi
+          done
+
   client:
     runs-on: ubuntu-latest
     defaults:
@@ -21,11 +51,23 @@ jobs:
       - run: corepack enable
       - run: yarn install --frozen-lockfile --non-interactive
       - run: yarn lint
+      - run: yarn typecheck
       - run: yarn test:markdown
       - run: yarn build
 
   server:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      valkey:
+        image: valkey/valkey:8
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     defaults:
       run:
         working-directory: server
@@ -38,5 +80,53 @@ jobs:
           cache-dependency-path: server/yarn.lock
       - run: corepack enable
       - run: yarn install --frozen-lockfile --non-interactive
+      - run: yarn check:env
+      - run: yarn typecheck
+      - run: yarn check:schema
       - run: yarn build
       - run: yarn test:unit
+      - run: yarn test:performance
+      - name: Check API and worker readiness
+        env:
+          APP_PORT: "8000"
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: "6379"
+          WORKER_METRICS_PORT: "9464"
+        run: |
+          set -euo pipefail
+          api_log="$RUNNER_TEMP/api.log"
+          worker_log="$RUNNER_TEMP/worker.log"
+          node dist/main.js >"$api_log" 2>&1 &
+          api_pid=$!
+          node dist/worker-node/worker.js >"$worker_log" 2>&1 &
+          worker_pid=$!
+          cleanup() {
+            kill "$worker_pid" "$api_pid" 2>/dev/null || true
+            wait "$worker_pid" "$api_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          wait_for_health() {
+            local name="$1" url="$2" pid="$3" log_file="$4"
+            for _ in {1..30}; do
+              if curl --fail --silent --show-error --max-time 2 "$url" >/dev/null; then
+                echo "$name is healthy."
+                return 0
+              fi
+              if ! kill -0 "$pid" 2>/dev/null; then
+                cat "$log_file"
+                return 1
+              fi
+              sleep 2
+            done
+            cat "$log_file"
+            echo "$name did not become healthy in time."
+            return 1
+          }
+
+          wait_for_health API "http://127.0.0.1:8000/" "$api_pid" "$api_log"
+          wait_for_health worker "http://127.0.0.1:9464/health" "$worker_pid" "$worker_log"
+          curl --fail --silent --show-error --max-time 5 \
+            -H 'content-type: application/json' \
+            -d '{"query":"{ __typename }"}' \
+            http://127.0.0.1:8000/graphql

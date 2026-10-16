@@ -1,0 +1,82 @@
+name: CD
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  smoke-check:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Wait for worker deploy from the checked commit
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_WORKER_SERVICE_ID: ${{ vars.RENDER_WORKER_SERVICE_ID }}
+          DEPLOY_COMMIT_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$RENDER_API_KEY" || -z "$RENDER_WORKER_SERVICE_ID" ]]; then
+            echo "Set the RENDER_API_KEY secret and RENDER_WORKER_SERVICE_ID Actions variable."
+            exit 1
+          fi
+
+          deadline=$((SECONDS + 1200))
+          while (( SECONDS < deadline )); do
+            deploys="$(curl --fail --silent --show-error --max-time 15 \
+              -H "Authorization: Bearer $RENDER_API_KEY" \
+              -H 'Accept: application/json' \
+              "https://api.render.com/v1/services/${RENDER_WORKER_SERVICE_ID}/deploys?limit=20")"
+            status="$(jq -r --arg sha "$DEPLOY_COMMIT_SHA" \
+              '[.[] | .deploy | select(.commit.id == $sha)] | first | .status // empty' \
+              <<< "$deploys")"
+
+            if [[ "$status" == live ]]; then
+              echo "Worker deploy for $DEPLOY_COMMIT_SHA is live."
+              exit 0
+            fi
+            if [[ "$status" == build_failed || "$status" == update_failed || "$status" == canceled || "$status" == pre_deploy_failed ]]; then
+              echo "Worker deploy for $DEPLOY_COMMIT_SHA failed with status: $status"
+              exit 1
+            fi
+            echo "Worker deploy status is '${status:-not found}'; retrying."
+            sleep 15
+          done
+          echo "Worker deploy for $DEPLOY_COMMIT_SHA did not become live before timeout."
+          exit 1
+
+      - name: Validate deployment URLs
+        env:
+          RENDER_API_URL: ${{ vars.RENDER_API_URL }}
+          RENDER_CLIENT_URL: ${{ vars.RENDER_CLIENT_URL }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$RENDER_API_URL" || -z "$RENDER_CLIENT_URL" ]]; then
+            echo "Set the RENDER_API_URL and RENDER_CLIENT_URL repository Actions variables."
+            exit 1
+          fi
+          [[ "$RENDER_API_URL" == https://* ]]
+          [[ "$RENDER_CLIENT_URL" == https://* ]]
+
+      - name: Wait for API health
+        env:
+          RENDER_API_URL: ${{ vars.RENDER_API_URL }}
+        run: curl --fail --silent --show-error --output /dev/null --retry 30 --retry-delay 10 --retry-all-errors --max-time 10 "${RENDER_API_URL%/}/"
+
+      - name: Wait for web health
+        env:
+          RENDER_CLIENT_URL: ${{ vars.RENDER_CLIENT_URL }}
+        run: curl --fail --silent --show-error --output /dev/null --retry 30 --retry-delay 10 --retry-all-errors --max-time 10 "${RENDER_CLIENT_URL%/}/"
+
+      - name: Verify the web-to-API rewrite
+        env:
+          RENDER_CLIENT_URL: ${{ vars.RENDER_CLIENT_URL }}
+        run: curl --fail --silent --show-error --retry 30 --retry-delay 10 --retry-all-errors --max-time 10 "${RENDER_CLIENT_URL%/}/api/backend/"

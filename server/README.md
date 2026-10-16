@@ -25,10 +25,10 @@ incompatible.
 
 API: http://localhost:8000. The frontend in `../client` uses this address.
 `yarn docker:up` also starts Prometheus at http://localhost:9090 and Grafana at
-http://localhost:3003. Grafana uses `GRAFANA_ADMIN_USER` and
-`GRAFANA_ADMIN_PASSWORD` from `.env`; the local fallback is `admin` / `admin`.
-Change the Grafana password before exposing this stack beyond localhost. The
-API and Prometheus host ports are bound to loopback; the worker metrics endpoint
+http://localhost:3003. Set unique, non-empty `GRAFANA_ADMIN_USER` and
+`GRAFANA_ADMIN_PASSWORD` values in `.env` before starting; Compose refuses to
+start Grafana if either value is missing. Never commit the configured `.env`.
+The API and Prometheus host ports are bound to loopback; the worker metrics endpoint
 is internal to Docker. If deploying with externally exposed ports, protect
 `/metrics` and Prometheus with an authenticated reverse proxy or network policy.
 Prometheus retains 15 days of samples.
@@ -65,7 +65,11 @@ The original root Compose stack is not modified or stopped.
 
 ## Local Development
 
-Create `.env` from `.env.example` only if it does not already exist, then run:
+Create `.env` from `.env.example` only if it does not already exist, fill only
+the values needed for the services you run, and keep the file untracked. The
+example intentionally leaves secret credentials blank. `yarn dev` starts only
+Valkey and Qdrant from `docker-compose.infra.yml`; `yarn docker:up` starts the
+full stack and requires unique, non-empty Grafana credentials. Then run:
 
 ```bash
 yarn install --frozen-lockfile

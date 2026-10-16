@@ -4,6 +4,14 @@ export const queueName = 'file-upload-queue';
 export const collectionName = 'langchainjs-testing';
 
 export function redisConnection() {
+  const redisUrl = process.env.REDIS_URL;
+  if (redisUrl) {
+    const parsedUrl = new URL(redisUrl);
+    return {
+      host: parsedUrl.hostname,
+      port: Number(parsedUrl.port || 6379),
+    };
+  }
   return {
     host: process.env.REDIS_HOST || 'localhost',
     port: Number(process.env.REDIS_PORT || 6380),
@@ -13,6 +21,7 @@ export function redisConnection() {
 export function createQdrantClient() {
   return new QdrantClient({
     url: process.env.QDRANT_URL || 'http://localhost:6333',
+    apiKey: process.env.QDRANT_API_KEY || undefined,
     checkCompatibility: false,
   });
 }

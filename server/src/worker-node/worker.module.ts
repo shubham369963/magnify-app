@@ -14,11 +14,18 @@ export class PdfWorker implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PdfWorker.name);
   private worker?: Worker;
   private metricsServer?: Server;
+  private workerReady = false;
 
   constructor(@Inject(PdfService) private readonly pdfService: PdfService) {}
 
   onModuleInit() {
     this.metricsServer = createServer((request, response) => {
+      if (request.url === '/health') {
+        const status = this.workerReady ? 200 : 503;
+        response.writeHead(status, { 'Content-Type': 'application/json' })
+          .end(JSON.stringify({ status: this.workerReady ? 'ready' : 'starting' }));
+        return;
+      }
       if (request.url !== '/metrics') {
         response.writeHead(404).end();
         return;
@@ -65,6 +72,7 @@ export class PdfWorker implements OnModuleInit, OnModuleDestroy {
       },
       { concurrency: 4, connection: redisConnection() },
     );
+    this.worker.on('ready', () => { this.workerReady = true; });
     this.worker.on('active', (job) => {
       const strategy = this.jobStrategy(job.name) as RagStrategy;
       metrics.observeWorkerActive(strategy, 1);
@@ -105,10 +113,14 @@ export class PdfWorker implements OnModuleInit, OnModuleDestroy {
         });
       }
     });
-    this.worker.on('error', (error) => this.logger.error(`Worker encountered an error: ${error.message}`, error.stack));
+    this.worker.on('error', (error) => {
+      this.workerReady = false;
+      this.logger.error(`Worker encountered an error: ${error.message}`, error.stack);
+    });
   }
 
   async onModuleDestroy() {
+    this.workerReady = false;
     await Promise.all([
       this.worker?.close(),
       this.metricsServer

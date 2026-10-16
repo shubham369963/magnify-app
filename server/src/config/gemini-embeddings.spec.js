@@ -1,7 +1,30 @@
 import assert from 'node:assert/strict';
-import { test } from '@jest/globals';
+import { afterEach, beforeEach, test } from '@jest/globals';
 import { ServiceUnavailableException } from '@nestjs/common';
 import { GeminiEmbeddings } from '../../dist/config/gemini-embeddings.js';
+
+const embeddingSettings = {
+  GEMINI_EMBEDDING_MODEL: 'gemini-embedding-2',
+  GEMINI_EMBEDDING_DIMENSIONS: '768',
+  GEMINI_EMBEDDING_BATCH_SIZE: '100',
+  GEMINI_EMBEDDING_MAX_ATTEMPTS: '3',
+  GEMINI_EMBEDDING_REQUEST_TIMEOUT_MS: '60000',
+  GEMINI_EMBEDDING_RETRY_DELAY_MS: '250',
+  GEMINI_EMBEDDING_RATE_LIMIT_RETRY_DELAY_MS: '15000',
+  GEMINI_EMBEDDING_RATE_LIMIT_MAX_DELAY_MS: '60000',
+  GEMINI_EMBEDDING_MAX_RETRY_AFTER_MS: '120000',
+};
+const previousEmbeddingSettings = Object.fromEntries(
+  Object.keys(embeddingSettings).map((key) => [key, process.env[key]]),
+);
+
+beforeEach(() => Object.assign(process.env, embeddingSettings));
+afterEach(() => {
+  for (const [key, value] of Object.entries(previousEmbeddingSettings)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+});
 
 test('Gemini embeddings use retrieval prompts and return 768-dimensional vectors', async () => {
   const previousKey = process.env.GOOGLE_API_KEY;
@@ -28,6 +51,31 @@ test('Gemini embeddings use retrieval prompts and return 768-dimensional vectors
     globalThis.fetch = previousFetch;
     if (previousKey === undefined) delete process.env.GOOGLE_API_KEY;
     else process.env.GOOGLE_API_KEY = previousKey;
+  }
+});
+
+test('Gemini model, dimensions, and batch size are configurable', async () => {
+  const previousFetch = globalThis.fetch;
+  process.env.GEMINI_EMBEDDING_MODEL = 'gemini-test-model';
+  process.env.GEMINI_EMBEDDING_DIMENSIONS = '3';
+  process.env.GEMINI_EMBEDDING_BATCH_SIZE = '1';
+  const requests = [];
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url, body: JSON.parse(options.body) });
+    return new Response(JSON.stringify({ embeddings: [{ values: [0.1, 0.2, 0.3] }] }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+  try {
+    const vectors = await new GeminiEmbeddings('test-only-key').embedDocuments(['one', 'two']);
+    assert.equal(vectors.length, 2);
+    assert.ok(vectors.every((vector) => vector.length === 3));
+    assert.equal(requests.length, 2);
+    assert.ok(requests.every((request) => request.url.endsWith('/gemini-test-model:batchEmbedContents')));
+    assert.ok(requests.every((request) => request.body.requests[0].outputDimensionality === 3));
+  } finally {
+    globalThis.fetch = previousFetch;
   }
 });
 
@@ -104,11 +152,12 @@ test('Gemini embedding errors include the provider reason for exhausted rate lim
     return 0;
   };
   try {
+    process.env.GEMINI_EMBEDDING_MAX_ATTEMPTS = '2';
     await assert.rejects(
       () => new GeminiEmbeddings('test-only-key').embedDocuments(['rate limited']),
       /Gemini embedding request failed \(429\): .*RESOURCE_EXHAUSTED/u,
     );
-    assert.equal(attempts, 3);
+    assert.equal(attempts, 2);
   } finally {
     globalThis.fetch = previousFetch;
     globalThis.setTimeout = previousTimeout;

@@ -22,7 +22,7 @@ async function bootstrap() {
   });
   app.enableCors();
   app.enableShutdownHooks();
-  const port = process.env.APP_PORT ?? 8000;
+  const port = process.env.APP_PORT || 8000;
   await app.listen(port);
   logger.log(`APP is listening on port http://localhost:${port}`);
 }

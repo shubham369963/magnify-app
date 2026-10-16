@@ -1,0 +1,150 @@
+services:
+  - type: keyvalue
+    name: magnify-redis
+    region: oregon
+    plan: 256mb
+    maxmemoryPolicy: noeviction
+    persistenceMode: journal-snapshot
+    ipAllowList: []
+
+  - type: web
+    name: magnify-api
+    runtime: docker
+    branch: main
+    region: oregon
+    plan: 0.5c-512mb
+    dockerfilePath: ./server/Dockerfile
+    dockerContext: ./server
+    dockerCommand: node dist/main.js
+    autoDeployTrigger: checksPass
+    healthCheckPath: /
+    maxShutdownDelaySeconds: 120
+    envVars:
+      - key: APP_PORT
+        value: "10000"
+      - key: METRICS_SERVICE_NAME
+        value: magnify-api
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: magnify-redis
+          property: connectionString
+      - fromGroup: magnify-runtime
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: OLLAMA_API_KEY
+        sync: false
+      - key: CLERK_JWKS_URL
+        sync: false
+      - key: CLERK_WEBHOOK_SIGNING_SECRET
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: PDF_INDEX_CHECKPOINT_DIR
+        value: /app/uploads/.vector-index-checkpoints
+      - key: WORKER_METRICS_PORT
+        value: "9464"
+      - key: METRICS_SERVICE_NAME
+        value: magnify-worker
+
+  - type: worker
+    name: magnify-worker
+    runtime: docker
+    branch: main
+    region: oregon
+    plan: 0.5c-512mb
+    dockerfilePath: ./server/Dockerfile
+    dockerContext: ./server
+    dockerCommand: node dist/worker-node/worker.js
+    autoDeployTrigger: checksPass
+    maxShutdownDelaySeconds: 120
+    envVars:
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: magnify-redis
+          property: connectionString
+      - fromGroup: magnify-runtime
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: OLLAMA_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+
+  - type: web
+    name: magnify-web
+    runtime: node
+    rootDir: client
+    branch: main
+    region: oregon
+    plan: 0.5c-512mb
+    buildCommand: corepack enable && yarn install --frozen-lockfile --non-interactive && yarn build
+    startCommand: yarn next start --hostname 0.0.0.0 --port $PORT
+    autoDeployTrigger: checksPass
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "22.14.0"
+      - key: NEST_API_HOSTPORT
+        fromService:
+          type: web
+          name: magnify-api
+          property: hostport
+      - key: NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
+        sync: false
+      - key: CLERK_SECRET_KEY
+        sync: false
+
+envVarGroups:
+  - name: magnify-runtime
+    envVars:
+      - key: OLLAMA_CLOUD_BASE_URL
+        value: https://ollama.com
+      - key: OLLAMA_CLOUD_CHAT_MODEL
+        value: gemma4:31b
+      - key: OLLAMA_CLOUD_VISION_MODEL
+        value: gemma4:31b
+      - key: RAG_MIN_RELEVANCE_SCORE
+        value: "0.45"
+      - key: RAG_TREE_MAX_CANDIDATES_PER_CALL
+        value: "20"
+      - key: RAG_TREE_MAX_EVIDENCE
+        value: "8"
+      - key: RAG_TREE_MAX_CONTEXT_EXPANSIONS
+        value: "4"
+      - key: RAG_TREE_SELECTOR_TOKEN_BUDGET
+        value: "12000"
+      # Keep the embedding model and dimensions compatible with stored Qdrant vectors.
+      - key: GEMINI_EMBEDDING_MODEL
+        value: gemini-embedding-2
+      - key: GEMINI_EMBEDDING_DIMENSIONS
+        value: "768"
+      - key: GEMINI_EMBEDDING_BATCH_SIZE
+        value: "100"
+      - key: GEMINI_EMBEDDING_MAX_ATTEMPTS
+        value: "3"
+      - key: GEMINI_EMBEDDING_REQUEST_TIMEOUT_MS
+        value: "60000"
+      - key: GEMINI_EMBEDDING_RETRY_DELAY_MS
+        value: "250"
+      - key: GEMINI_EMBEDDING_RATE_LIMIT_RETRY_DELAY_MS
+        value: "15000"
+      - key: GEMINI_EMBEDDING_RATE_LIMIT_MAX_DELAY_MS
+        value: "60000"
+      - key: GEMINI_EMBEDDING_MAX_RETRY_AFTER_MS
+        value: "120000"
+      - key: SUPABASE_STORAGE_BUCKET
+        value: documents
