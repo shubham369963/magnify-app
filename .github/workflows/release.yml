@@ -9,17 +9,20 @@ permissions:
 
 jobs:
   checks:
+    name: Run CI checks for release
     uses: ./.github/workflows/ci.yml
     permissions:
       contents: read
 
   publish:
+    name: Publish GitHub release
     needs: checks
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out repository and release history
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - name: Verify release tag resolves to this commit

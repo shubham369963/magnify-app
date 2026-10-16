@@ -1,4 +1,5 @@
 services:
+  # Private Redis-compatible queue used by the API and worker.
   - type: keyvalue
     name: magnify-redis
     region: oregon
@@ -7,6 +8,7 @@ services:
     persistenceMode: journal-snapshot
     ipAllowList: []
 
+  # Public NestJS API. Uploaded PDFs and vectors live in Supabase and Qdrant.
   - type: web
     name: magnify-api
     runtime: docker
@@ -15,6 +17,7 @@ services:
     plan: 0.5c-512mb
     dockerfilePath: ./server/Dockerfile
     dockerContext: ./server
+    # Start the HTTP API on the port configured by APP_PORT.
     dockerCommand: node dist/main.js
     autoDeployTrigger: checksPass
     healthCheckPath: /
@@ -48,11 +51,8 @@ services:
         sync: false
       - key: PDF_INDEX_CHECKPOINT_DIR
         value: /app/uploads/.vector-index-checkpoints
-      - key: WORKER_METRICS_PORT
-        value: "9464"
-      - key: METRICS_SERVICE_NAME
-        value: magnify-worker
 
+  # Background PDF ingestion and indexing process.
   - type: worker
     name: magnify-worker
     runtime: docker
@@ -61,6 +61,7 @@ services:
     plan: 0.5c-512mb
     dockerfilePath: ./server/Dockerfile
     dockerContext: ./server
+    # Start the BullMQ PDF ingestion worker.
     dockerCommand: node dist/worker-node/worker.js
     autoDeployTrigger: checksPass
     maxShutdownDelaySeconds: 120
@@ -83,7 +84,12 @@ services:
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
+      - key: WORKER_METRICS_PORT
+        value: "9464"
+      - key: METRICS_SERVICE_NAME
+        value: magnify-worker
 
+  # Next.js frontend; its server-side rewrite calls the API over Render's private network.
   - type: web
     name: magnify-web
     runtime: node
@@ -91,7 +97,9 @@ services:
     branch: main
     region: oregon
     plan: 0.5c-512mb
+    # Install frontend dependencies and produce the Next.js production bundle.
     buildCommand: corepack enable && yarn install --frozen-lockfile --non-interactive && yarn build
+    # Bind the production frontend server to Render's assigned port.
     startCommand: yarn next start --hostname 0.0.0.0 --port $PORT
     autoDeployTrigger: checksPass
     healthCheckPath: /
@@ -109,6 +117,7 @@ services:
         sync: false
 
 envVarGroups:
+  # Shared non-secret runtime defaults for the backend API and worker.
   - name: magnify-runtime
     envVars:
       - key: OLLAMA_CLOUD_BASE_URL

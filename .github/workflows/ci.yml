@@ -12,10 +12,13 @@ permissions:
 
 jobs:
   deployment-config:
+    name: Validate deployment configuration
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: ruby/setup-ruby@v1
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Ruby for YAML validation
+        uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.3"
       - name: Validate deployment YAML syntax
@@ -37,25 +40,37 @@ jobs:
           done
 
   client:
+    name: Validate frontend
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: client
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: yarn
           cache-dependency-path: client/yarn.lock
-      - run: corepack enable
-      - run: yarn install --frozen-lockfile --non-interactive
-      - run: yarn lint
-      - run: yarn typecheck
-      - run: yarn test:markdown
-      - run: yarn build
+      - name: Enable Corepack
+        run: corepack enable
+      - name: Install frontend dependencies
+        run: yarn install --frozen-lockfile --non-interactive
+      - name: Lint frontend
+        run: yarn lint
+      - name: Generate Next.js route types
+        run: yarn next typegen
+      - name: Type-check frontend
+        run: yarn typecheck
+      - name: Test Markdown rendering
+        run: yarn test:markdown
+      - name: Build frontend
+        run: yarn build
 
   server:
+    name: Validate backend and service startup
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
@@ -72,20 +87,30 @@ jobs:
       run:
         working-directory: server
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: yarn
           cache-dependency-path: server/yarn.lock
-      - run: corepack enable
-      - run: yarn install --frozen-lockfile --non-interactive
-      - run: yarn check:env
-      - run: yarn typecheck
-      - run: yarn check:schema
-      - run: yarn build
-      - run: yarn test:unit
-      - run: yarn test:performance
+      - name: Enable Corepack
+        run: corepack enable
+      - name: Install backend dependencies
+        run: yarn install --frozen-lockfile --non-interactive
+      - name: Check environment template coverage
+        run: yarn check:env
+      - name: Type-check backend
+        run: yarn typecheck
+      - name: Validate GraphQL schema
+        run: yarn check:schema
+      - name: Build backend
+        run: yarn build
+      - name: Run backend unit tests
+        run: yarn test:unit
+      - name: Run PDF processing performance tests
+        run: yarn test:performance
       - name: Check API and worker readiness
         env:
           APP_PORT: "8000"
