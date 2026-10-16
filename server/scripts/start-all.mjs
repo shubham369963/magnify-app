@@ -1,3 +1,4 @@
+import { mkdirSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import process from "node:process";
@@ -52,6 +53,11 @@ if (mode === "api") {
 } else if (mode === "worker") {
   start("Worker", process.execPath, ["server/dist/worker-node/worker.js"]);
 } else {
+  mkdirSync("/tmp/redis", { recursive: true });
+  mkdirSync("/tmp/prometheus", { recursive: true });
+  mkdirSync("/tmp/grafana/log", { recursive: true });
+  mkdirSync("/tmp/grafana/plugins", { recursive: true });
+
   const redisUrl = process.env.REDIS_URL || "redis://127.0.0.1:6379";
   const redis = new URL(redisUrl);
   const localRedis = ["localhost", "127.0.0.1", "::1"].includes(redis.hostname);
