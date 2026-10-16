@@ -72,12 +72,22 @@ export class PdfWorker implements OnModuleInit, OnModuleDestroy {
       },
       { concurrency: 4, connection: redisConnection() },
     );
-    this.worker.on('ready', () => { this.workerReady = true; });
+    this.worker.on('ready', () => {
+      this.workerReady = true;
+      this.logger.log(JSON.stringify({ event: 'worker.ready', queue: queueName, concurrency: 4 }));
+    });
     this.worker.on('active', (job) => {
       const strategy = this.jobStrategy(job.name) as RagStrategy;
       metrics.observeWorkerActive(strategy, 1);
       metrics.observeWorkerAttempt(strategy, 'started');
       metrics.observeWorkerQueueWait(strategy, ((job.processedOn ?? Date.now()) - job.timestamp) / 1000);
+      this.logger.log(JSON.stringify({
+        event: 'worker.job',
+        status: 'started',
+        jobId: job.id,
+        strategy,
+        traceId: job.data.traceId,
+      }));
     });
     this.worker.on('completed', (job) => {
       const strategy = this.jobStrategy(job.name) as RagStrategy;
