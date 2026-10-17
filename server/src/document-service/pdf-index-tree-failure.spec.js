@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from '@jest/globals';
 import { PdfService } from '../../dist/document-service/pdf.service.js';
 
-test('exhausted current tree jobs mark the project and its documents failed', async () => {
+test('exhausted tree-only jobs fail the tree without overwriting combined document statuses', async () => {
   const calls = [];
   const service = Object.create(PdfService.prototype);
   service.logger = { log() {}, warn() {}, error() {} };
@@ -16,9 +16,7 @@ test('exhausted current tree jobs mark the project and its documents failed', as
 
   assert.equal(calls[0][1], 'fail_project_index_tree');
   assert.equal(calls[0][2].p_error_message, 'PDF index failed');
-  assert.equal(calls[1][1], 'documents');
-  assert.equal(calls[1][3].processing_status, 'failed');
-  assert.equal(calls[1][3].processing_error, 'PDF index failed');
+  assert.equal(calls.length, 1);
 });
 
 test('stale tree jobs do not fail a newer project generation', async () => {

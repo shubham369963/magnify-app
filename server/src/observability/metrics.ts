@@ -8,6 +8,7 @@ import {
 import { getTraceContext } from './trace-context.js';
 
 export type RagStrategy = 'vector' | 'index_tree';
+export type IngestionStrategy = RagStrategy | 'both';
 export type MetricOutcome = 'success' | 'error' | 'stale';
 export type GraphqlOperationType = 'query' | 'mutation' | 'subscription' | 'unknown';
 export type GraphqlErrorPhase = 'request' | 'execution';
@@ -40,7 +41,7 @@ const ingestionStageDuration = new Histogram({
   name: 'magnify_ingestion_stage_duration_seconds',
   help: 'Duration of individual PDF indexing stages.',
   labelNames: ['strategy', 'stage'] as const,
-  buckets: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 15, 30, 60, 120, 300],
+  buckets: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 15, 30, 60, 120, 300, 600, 1200, 1800, 3600],
   registers: [registry],
 });
 
@@ -113,9 +114,9 @@ const workerActiveJobs = new Gauge({
 
 const workerQueueWait = new Histogram({
   name: 'magnify_worker_queue_wait_seconds',
-  help: 'Time indexing jobs spend waiting in the queue.',
+  help: 'Initial queue wait, excluding retry and stalled-job reactivations.',
   labelNames: ['strategy'] as const,
-  buckets: [0.1, 0.5, 1, 2.5, 5, 15, 30, 60, 300, 900],
+  buckets: [0.1, 0.5, 1, 2.5, 5, 15, 30, 60, 120, 300, 600, 900, 1800, 3600],
   registers: [registry],
 });
 
@@ -158,7 +159,7 @@ const dependencyDuration = new Histogram({
   name: 'magnify_dependency_duration_seconds',
   help: 'External dependency call duration by system, operation, and outcome.',
   labelNames: ['system', 'operation', 'outcome'] as const,
-  buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60],
+  buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600, 1200, 1800, 3600],
   registers: [registry],
 });
 
@@ -294,7 +295,7 @@ export const metrics = {
     };
   },
 
-  startIngestion(strategy: RagStrategy) {
+  startIngestion(strategy: IngestionStrategy) {
     const stop = ingestionDuration.startTimer({ strategy });
     let outcome: MetricOutcome = 'error';
     return {
@@ -308,11 +309,11 @@ export const metrics = {
     };
   },
 
-  startIngestionStage(strategy: RagStrategy, stage: string) {
+  startIngestionStage(strategy: IngestionStrategy, stage: string) {
     return ingestionStageDuration.startTimer({ strategy, stage });
   },
 
-  async trackStage<T>(strategy: RagStrategy, stage: string, task: () => Promise<T>): Promise<T> {
+  async trackStage<T>(strategy: IngestionStrategy, stage: string, task: () => Promise<T>): Promise<T> {
     const stop = ingestionStageDuration.startTimer({ strategy, stage });
     try {
       return await task();
@@ -324,7 +325,7 @@ export const metrics = {
     }
   },
 
-  trackStageSync<T>(strategy: RagStrategy, stage: string, task: () => T): T {
+  trackStageSync<T>(strategy: IngestionStrategy, stage: string, task: () => T): T {
     const stop = ingestionStageDuration.startTimer({ strategy, stage });
     try {
       return task();
@@ -336,7 +337,7 @@ export const metrics = {
     }
   },
 
-  addIngestionUnits(strategy: RagStrategy, unit: string, amount = 1) {
+  addIngestionUnits(strategy: IngestionStrategy, unit: string, amount = 1) {
     if (amount > 0) ingestionUnits.inc({ strategy, unit }, amount);
   },
 
@@ -397,7 +398,7 @@ export const metrics = {
     chatEvidence.observe({ strategy, phase }, count);
   },
 
-  async trackModelCall<T>(strategy: RagStrategy, operation: string, call: () => Promise<T>): Promise<T> {
+  async trackModelCall<T>(strategy: IngestionStrategy, operation: string, call: () => Promise<T>): Promise<T> {
     const startedAt = Date.now();
     const stop = modelCallDuration.startTimer({ provider: modelProvider, strategy, operation });
     let outcome: MetricOutcome = 'error';
@@ -426,11 +427,11 @@ export const metrics = {
     }
   },
 
-  observeWorkerActive(strategy: RagStrategy, delta: 1 | -1) {
+  observeWorkerActive(strategy: IngestionStrategy, delta: 1 | -1) {
     workerActiveJobs.inc({ strategy }, delta);
   },
 
-  observeWorkerQueueWait(strategy: RagStrategy, seconds: number) {
+  observeWorkerQueueWait(strategy: IngestionStrategy, seconds: number) {
     workerQueueWait.observe({ strategy }, Math.max(0, seconds));
   },
 
@@ -485,15 +486,15 @@ export const metrics = {
     if (bytes > 0) dependencyPayloadBytes.observe({ system, operation, direction }, bytes);
   },
 
-  observeWorkerJobDuration(strategy: RagStrategy, outcome: 'success' | 'error' | 'stale', seconds: number) {
+  observeWorkerJobDuration(strategy: IngestionStrategy, outcome: 'success' | 'error' | 'stale', seconds: number) {
     workerJobDuration.observe({ strategy, outcome }, Math.max(0, seconds));
   },
 
-  observeWorkerRetry(strategy: RagStrategy) {
+  observeWorkerRetry(strategy: IngestionStrategy) {
     workerJobRetries.inc({ strategy });
   },
 
-  observeWorkerAttempt(strategy: RagStrategy, outcome: 'started' | 'success' | 'error') {
+  observeWorkerAttempt(strategy: IngestionStrategy, outcome: 'started' | 'success' | 'error') {
     workerJobAttempts.inc({ strategy, outcome });
   },
 

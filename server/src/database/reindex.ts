@@ -28,7 +28,7 @@ async function reindexDocuments() {
         }),
       );
       for (const document of documents) {
-        await queue.add('file-ready', {
+        await queue.add('document-index', {
           documentId: document.id,
           projectId: document.project_id,
           ownerId: document.owner_clerk_id,

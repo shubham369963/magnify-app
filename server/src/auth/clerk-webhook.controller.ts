@@ -13,6 +13,7 @@ import {
 import type { Request } from 'express';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { ProjectsService } from '../project-service/projects.service.js';
+import { UploadService } from '../document-service/upload.service.js';
 
 interface ClerkWebhookEvent {
   type: string;
@@ -66,7 +67,10 @@ export function verifyClerkWebhook(
 
 @Controller('webhooks/clerk')
 export class ClerkWebhookController {
-  constructor(@Inject(ProjectsService) private readonly projects: ProjectsService) {}
+  constructor(
+    @Inject(ProjectsService) private readonly projects: ProjectsService,
+    @Inject(UploadService) private readonly uploads: UploadService,
+  ) {}
 
   @Post()
   @HttpCode(200)
@@ -85,7 +89,11 @@ export class ClerkWebhookController {
       if (typeof ownerId !== 'string' || !ownerId) {
         throw new BadRequestException('Deleted Clerk user ID is missing.');
       }
+      // Drop pending jobs first so workers do not start indexing data being deleted.
+      await this.uploads.removeOwnerJobs(ownerId);
       await this.projects.deleteUserData(ownerId);
+      // Clear records of jobs that finished while the data was being deleted.
+      await this.uploads.removeOwnerJobs(ownerId);
     }
     return { received: true };
   }

@@ -18,7 +18,6 @@ import {
   Typography,
 } from "@mui/material";
 import { backendGraphqlRequest, backendRequest, type TokenGetter } from "../lib/client";
-import { UPLOAD_PROJECT_INDEX_STATUS_QUERY } from "../lib/graphql/queries/upload-project-index-status";
 import { UPLOAD_STATUS_QUERY } from "../lib/graphql/queries/upload-status";
 import { formatDuration } from "../lib/format-duration";
 
@@ -34,7 +33,8 @@ const maxPdfSizeLabel = `${Number((MAX_PDF_SIZE_BYTES / (1024 * 1024)).toFixed(2
 
 interface FileUploadProps {
   projectId: string;
-  ragStrategy: "vector" | "index_tree";
+  indexing?: boolean;
+  deletedDocumentIds?: ReadonlySet<string>;
   getToken: TokenGetter;
   onUploaded: () => void;
 }
@@ -54,7 +54,7 @@ function uploadStorageKey(projectId: string) {
   return `magnify:upload-timings:${projectId}`;
 }
 
-export default function FileUpload({ projectId, ragStrategy, getToken, onUploaded }: FileUploadProps) {
+export default function FileUpload({ projectId, indexing = false, deletedDocumentIds, getToken, onUploaded }: FileUploadProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
@@ -64,6 +64,8 @@ export default function FileUpload({ projectId, ragStrategy, getToken, onUploade
   const onUploadedRef = useRef(onUploaded);
   const pollingRef = useRef(false);
   const notifiedJobsRef = useRef(new Set<string>());
+  const processing = indexing || uploads.some((item) => item.status === "uploading" || item.status === "queued" || item.status === "processing");
+  const uploadDisabled = uploading || processing || loadedStorageKey !== uploadStorageKey(projectId);
 
   uploadsRef.current = uploads;
   onUploadedRef.current = onUploaded;
@@ -73,7 +75,9 @@ export default function FileUpload({ projectId, ragStrategy, getToken, onUploade
     try {
       const stored = localStorage.getItem(key);
       const items = stored ? JSON.parse(stored) as UploadItem[] : [];
-      setUploads(Array.isArray(items) ? items.slice(-20) : []);
+      setUploads(Array.isArray(items) ? items.map((item) => item.status === "uploading"
+        ? { ...item, status: "failed", error: "Upload was interrupted. Please upload the PDF again." }
+        : item) : []);
     } catch {
       setUploads([]);
     }
@@ -81,10 +85,19 @@ export default function FileUpload({ projectId, ragStrategy, getToken, onUploade
   }, [projectId]);
 
   useEffect(() => {
+    if (!deletedDocumentIds?.size) return;
+    setUploads((current) => current.some((item) => item.jobId && deletedDocumentIds.has(item.jobId))
+      ? current.filter((item) => !item.jobId || !deletedDocumentIds.has(item.jobId))
+      : current);
+  }, [deletedDocumentIds, loadedStorageKey]);
+
+  useEffect(() => {
     const key = uploadStorageKey(projectId);
     if (loadedStorageKey !== key) return;
     try {
-      localStorage.setItem(key, JSON.stringify(uploads.slice(-20)));
+      localStorage.setItem(key, JSON.stringify(uploads.filter((item, index) =>
+        item.status === "uploading" || item.status === "queued" || item.status === "processing" || index >= uploads.length - 20,
+      )));
     } catch {
       // Keep timing display usable if browser storage is unavailable or full.
     }
@@ -92,6 +105,13 @@ export default function FileUpload({ projectId, ragStrategy, getToken, onUploade
 
   useEffect(() => {
     let stopped = false;
+    const removeDeletedUpload = (upload: UploadItem) => {
+      setUploads((current) => current.filter((item) => item.key !== upload.key));
+      if (upload.jobId && !notifiedJobsRef.current.has(upload.jobId)) {
+        notifiedJobsRef.current.add(upload.jobId);
+        onUploadedRef.current();
+      }
+    };
     const checkStatus = async () => {
       if (pollingRef.current || stopped) return;
       const pending = uploadsRef.current.filter((upload) =>
@@ -103,26 +123,15 @@ export default function FileUpload({ projectId, ragStrategy, getToken, onUploade
         await Promise.all(pending.map(async (upload) => {
           try {
             const { uploadStatus: result } = await backendGraphqlRequest<{
-              uploadStatus: { status: UploadItem["status"]; error?: string | null };
+              uploadStatus: { status: UploadItem["status"] | "deleted"; error?: string | null };
             }>(getToken, UPLOAD_STATUS_QUERY, { jobId: upload.jobId });
             if (stopped) return;
-            let status = result.status;
-            let statusError = result.error ?? undefined;
-            if (status === "completed" && ragStrategy === "index_tree") {
-              const { projectIndexTreeStatus } = await backendGraphqlRequest<{
-                projectIndexTreeStatus: {
-                  status: "pending" | "processing" | "completed" | "failed";
-                  error_message: string | null;
-                } | null;
-              }>(getToken, UPLOAD_PROJECT_INDEX_STATUS_QUERY, { projectId });
-              if (projectIndexTreeStatus?.status === "failed") {
-                status = "failed";
-                statusError = projectIndexTreeStatus.error_message || "Project index creation failed.";
-              } else if (projectIndexTreeStatus?.status !== "completed") {
-                status = "processing";
-                statusError = undefined;
-              }
+            const status = result.status;
+            if (status === "deleted") {
+              removeDeletedUpload(upload);
+              return;
             }
+            const statusError = result.error ?? undefined;
             setUploads((current) => current.map((item) => item.key === upload.key
               ? {
                   ...item,
@@ -137,8 +146,13 @@ export default function FileUpload({ projectId, ragStrategy, getToken, onUploade
               notifiedJobsRef.current.add(upload.jobId!);
               onUploadedRef.current();
             }
-          } catch {
+          } catch (cause) {
             if (!stopped) {
+              // Older APIs report deleted uploads as not found rather than "deleted".
+              if (cause instanceof Error && cause.message === "Upload job not found.") {
+                removeDeletedUpload(upload);
+                return;
+              }
               setUploads((current) => current.map((item) => item.key === upload.key
                 ? { ...item, error: "Status check failed; retrying." }
                 : item));
@@ -155,10 +169,10 @@ export default function FileUpload({ projectId, ragStrategy, getToken, onUploade
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [getToken, projectId, ragStrategy]);
+  }, [getToken, projectId]);
 
   async function upload(files: FileList | null) {
-    if (!files?.length || uploading) return;
+    if (!files?.length || uploadDisabled) return;
     setError("");
     const selected = Array.from(files);
     const accepted = selected.filter((file) =>
@@ -223,11 +237,11 @@ export default function FileUpload({ projectId, ragStrategy, getToken, onUploade
 
   return (
     <Box>
-      <input ref={inputRef} hidden type="file" accept="application/pdf,.pdf" multiple aria-label="Select PDF files" onChange={(event) => void upload(event.target.files)} />
-      <Button fullWidth variant="outlined" startIcon={uploading ? <CircularProgress size={18} /> : <CloudUploadOutlined />} disabled={uploading} onClick={() => inputRef.current?.click()} sx={{ minHeight: 48, justifyContent: "flex-start", px: 1.75 }}>
-        {uploading ? "Uploading PDFs..." : "Upload PDFs"}
+      <input ref={inputRef} hidden type="file" accept="application/pdf,.pdf" multiple disabled={uploadDisabled} aria-label="Select PDF files" onChange={(event) => void upload(event.target.files)} />
+      <Button fullWidth variant="outlined" startIcon={uploading || processing ? <CircularProgress size={18} /> : <CloudUploadOutlined />} disabled={uploadDisabled} onClick={() => inputRef.current?.click()} sx={{ minHeight: 48, justifyContent: "flex-start", px: 1.75 }}>
+        {uploading ? "Uploading PDFs..." : processing ? "Indexing PDFs..." : "Upload PDFs"}
       </Button>
-      <Stack role="status" aria-live="polite" aria-busy={uploading} spacing={0.75} sx={{ mt: 1.25 }}>
+      <Stack role="status" aria-live="polite" aria-busy={uploading || processing} spacing={0.75} sx={{ mt: 1.25 }}>
         {uploads.slice(-4).map((item) => (
           <Paper key={item.key} variant="outlined" sx={{ p: 1, minWidth: 0 }}>
             <Stack direction="row" spacing={1} sx={{ alignItems: "center", minWidth: 0 }}>
@@ -254,7 +268,7 @@ export default function FileUpload({ projectId, ragStrategy, getToken, onUploade
                 )}
                 {item.indexDurationMs !== undefined && (
                   <Typography variant="caption" color="text.secondary">
-                    {ragStrategy === "index_tree" ? "Index Tree" : "Vector"} indexing {formatDuration(item.indexDurationMs)}
+                    Vector + Index Tree indexing {formatDuration(item.indexDurationMs)}
                     {item.status === "queued" || item.status === "processing" ? " elapsed" : " total"}
                   </Typography>
                 )}

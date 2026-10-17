@@ -40,13 +40,17 @@ test('user.deleted events invoke owner data cleanup', async () => {
   const previousSecret = process.env.CLERK_WEBHOOK_SIGNING_SECRET;
   process.env.CLERK_WEBHOOK_SIGNING_SECRET = secret;
   let deletedOwner;
+  const order = [];
   const controller = new ClerkWebhookController({
-    deleteUserData: async (ownerId) => { deletedOwner = ownerId; },
+    deleteUserData: async (ownerId) => { deletedOwner = ownerId; order.push('data'); },
+  }, {
+    removeOwnerJobs: async (ownerId) => { assert.equal(ownerId, 'user_deleted'); order.push('jobs'); },
   });
   const signed = signedEvent({ type: 'user.deleted', data: { id: 'user_deleted' } });
   try {
     assert.deepEqual(await controller.receive({ rawBody: signed.rawBody }, signed.webhookId, signed.timestamp, signed.signature), { received: true });
     assert.equal(deletedOwner, 'user_deleted');
+    assert.deepEqual(order, ['jobs', 'data', 'jobs']);
   } finally {
     if (previousSecret === undefined) delete process.env.CLERK_WEBHOOK_SIGNING_SECRET;
     else process.env.CLERK_WEBHOOK_SIGNING_SECRET = previousSecret;
