@@ -57,6 +57,22 @@ envVarGroups:
   # Shared non-secret runtime defaults for the backend API and worker.
   - name: magnify-runtime
     envVars:
+      - key: PDF_WORKER_CONCURRENCY
+        value: "4"
+      - key: GEMINI_EMBEDDING_BATCH_CONCURRENCY
+        value: "2"
+      - key: PDF_IMAGE_CONCURRENCY
+        value: "4"
+      - key: PDF_RENDER_CONCURRENCY
+        value: "2"
+      - key: PDF_IMAGE_MIN_WIDTH
+        value: "150"
+      - key: PDF_IMAGE_MIN_HEIGHT
+        value: "150"
+      - key: PDF_IMAGE_MIN_DISPLAY_POINTS
+        value: "72"
+      - key: PDF_IMAGE_MAX_REPEAT_PAGES
+        value: "3"
       - key: OLLAMA_CLOUD_BASE_URL
         value: https://ollama.com
       - key: OLLAMA_CLOUD_CHAT_MODEL
@@ -86,11 +102,11 @@ envVarGroups:
         value: "60000"
       - key: GEMINI_EMBEDDING_RETRY_DELAY_MS
         value: "250"
-      - key: GEMINI_EMBEDDING_RATE_LIMIT_RETRY_DELAY_MS
-        value: "15000"
-      - key: GEMINI_EMBEDDING_RATE_LIMIT_MAX_DELAY_MS
-        value: "60000"
       - key: GEMINI_EMBEDDING_MAX_RETRY_AFTER_MS
         value: "120000"
+      - key: GEMINI_EMBEDDING_RATE_LIMIT_PER_MINUTE
+        value: "100"
+      - key: GEMINI_EMBEDDING_RATE_LIMIT_UNIT
+        value: request
       - key: SUPABASE_STORAGE_BUCKET
         value: documents

@@ -33,6 +33,7 @@ export interface ProjectIndexTreeNode {
   end_page?: number;
   source_order?: number;
   content_reference?: string;
+  normalized_content?: string;
   previous_evidence_id?: string;
   next_evidence_id?: string;
   continues_from_previous?: boolean;
@@ -412,4 +413,76 @@ export function summarizeSourcePassages(passages: SourcePassage[]): string {
     return [`${sentence.slice(0, boundary > 0 ? boundary : 240)}...`];
   });
   return excerpts.length ? `Source content: ${excerpts.join(' | ')}` : '';
+}
+
+export function createDocumentTreeNode(
+  document: { id: string; file_name: string },
+  pages: Array<{ pageNumber: number; text: string }>,
+  captions: Array<{ pageNumber: number; caption: string }>,
+): ProjectIndexTreeNode {
+  const passages = createSourcePassages(pages);
+  for (const { pageNumber, caption } of captions) {
+    if (!caption) continue;
+    passages.push({
+      id: '',
+      sourceOrder: passages.length + 1,
+      page: pageNumber,
+      content: caption,
+      normalizedContent: normalizeStructuredPageText(caption) ?? caption,
+      contentType: 'image_caption',
+    });
+  }
+  orderSourcePassages(passages, document.id);
+  if (!passages.length) throw new Error(`${document.file_name} has no extractable text or image captions.`);
+
+  const byId = new Map(passages.map((passage) => [passage.id, passage]));
+  const evidence = passages.map((passage): ProjectIndexTreeNode => ({
+    id: `evidence-${document.id}-${passage.id}`,
+    type: 'passage',
+    title: `Page ${passage.page}`,
+    document_id: document.id,
+    source: document.file_name,
+    page: passage.page,
+    source_order: passage.sourceOrder,
+    continues_from_previous: passage.continuesFromPrevious,
+    continues_to_next: passage.continuesToNext,
+    content_type: passage.contentType ?? 'text',
+    content_reference: passage.content,
+    normalized_content: passage.normalizedContent ?? passage.content,
+  }));
+  linkAdjacentTreeEvidence(evidence);
+  const evidenceById = new Map(evidence.map((node) => [node.id, node]));
+  const collectIds = (section: ProposedIndexSection): string[] => [
+    ...section.passageIds, ...(section.children ?? []).flatMap(collectIds),
+  ];
+  let sectionIndex = 0;
+  const sectionNode = (section: ProposedIndexSection, depth: number): ProjectIndexTreeNode => {
+    const sectionPassages = collectIds(section).map((id) => byId.get(id)!)
+      .sort((left, right) => left.sourceOrder - right.sourceOrder);
+    const pageNumbers = sectionPassages.map((passage) => passage.page);
+    return {
+      id: createIndexSectionId(document.id, ++sectionIndex),
+      type: depth === 0 ? 'section' : 'subsection',
+      title: section.title,
+      summary: summarizeSourcePassages(sectionPassages),
+      start_page: Math.min(...pageNumbers),
+      end_page: Math.max(...pageNumbers),
+      children: [
+        ...(section.children ?? []).map((child) => sectionNode(child, depth + 1)),
+        ...section.passageIds.map((id) => evidenceById.get(`evidence-${document.id}-${id}`)!),
+      ],
+    };
+  };
+  const pageNumbers = passages.map((passage) => passage.page);
+  return {
+    id: `document-${document.id}`,
+    type: 'document',
+    title: document.file_name,
+    summary: `${pages.length} pages of extracted text and ${captions.filter(({ caption }) => caption).length} image captions`,
+    document_id: document.id,
+    source: document.file_name,
+    start_page: Math.min(...pageNumbers),
+    end_page: Math.max(...pageNumbers),
+    children: groupSourcePassagesBySection(passages).map((section) => sectionNode(section, 0)),
+  };
 }

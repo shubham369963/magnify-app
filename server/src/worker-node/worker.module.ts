@@ -5,9 +5,11 @@ import type { ProjectTreeJobData, UploadJobData } from '../document-service/pdf.
 import { queueName, redisConnection } from '../config/settings.js';
 import { PdfProcessingModule } from '../document-service/pdf-processing.module.js';
 import { createServer, type Server } from 'node:http';
-import { metrics, type RagStrategy } from '../observability/metrics.js';
+import { metrics, type IngestionStrategy } from '../observability/metrics.js';
 import { runWithTraceContext } from '../observability/trace-context.js';
 import { randomUUID } from 'node:crypto';
+import { readPdfProcessingSettings } from '../config/pdf-processing.js';
+import { initialQueueWaitSeconds } from './worker-timing.js';
 
 @Injectable()
 export class PdfWorker implements OnModuleInit, OnModuleDestroy {
@@ -19,6 +21,7 @@ export class PdfWorker implements OnModuleInit, OnModuleDestroy {
   constructor(@Inject(PdfService) private readonly pdfService: PdfService) {}
 
   onModuleInit() {
+    const { workerConcurrency } = readPdfProcessingSettings();
     this.metricsServer = createServer((request, response) => {
       if (request.url === '/health') {
         const status = this.workerReady ? 200 : 503;
@@ -70,27 +73,31 @@ export class PdfWorker implements OnModuleInit, OnModuleDestroy {
         return result;
         });
       },
-      { concurrency: 4, connection: redisConnection() },
+      { concurrency: workerConcurrency, connection: redisConnection() },
     );
     this.worker.on('ready', () => {
       this.workerReady = true;
-      this.logger.log(JSON.stringify({ event: 'worker.ready', queue: queueName, concurrency: 4 }));
+      this.logger.log(JSON.stringify({ event: 'worker.ready', queue: queueName, concurrency: workerConcurrency }));
     });
     this.worker.on('active', (job) => {
-      const strategy = this.jobStrategy(job.name) as RagStrategy;
+      const strategy = this.jobStrategy(job.name);
       metrics.observeWorkerActive(strategy, 1);
       metrics.observeWorkerAttempt(strategy, 'started');
-      metrics.observeWorkerQueueWait(strategy, ((job.processedOn ?? Date.now()) - job.timestamp) / 1000);
+      const queueWaitSeconds = initialQueueWaitSeconds(job);
+      if (queueWaitSeconds !== undefined) metrics.observeWorkerQueueWait(strategy, queueWaitSeconds);
       this.logger.log(JSON.stringify({
         event: 'worker.job',
         status: 'started',
         jobId: job.id,
         strategy,
         traceId: job.data.traceId,
+        attempt: job.attemptsMade + 1,
+        queueWaitSeconds,
+        jobAgeSeconds: ((job.processedOn ?? Date.now()) - job.timestamp) / 1000,
       }));
     });
     this.worker.on('completed', (job) => {
-      const strategy = this.jobStrategy(job.name) as RagStrategy;
+      const strategy = this.jobStrategy(job.name);
       metrics.observeWorkerActive(strategy, -1);
       metrics.observeWorkerAttempt(strategy, 'success');
       metrics.observeWorkerJobDuration(strategy, 'success', ((job.finishedOn ?? Date.now()) - (job.processedOn ?? Date.now())) / 1000);
@@ -139,8 +146,8 @@ export class PdfWorker implements OnModuleInit, OnModuleDestroy {
     ]);
   }
 
-  private jobStrategy(jobName: string): RagStrategy {
-    return jobName === 'project-index-tree' ? 'index_tree' : 'vector';
+  private jobStrategy(jobName: string): IngestionStrategy {
+    return jobName === 'project-index-tree' ? 'index_tree' : 'both';
   }
 }
 

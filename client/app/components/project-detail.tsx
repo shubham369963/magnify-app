@@ -104,6 +104,10 @@ export default function ProjectDetail({ projectId }: { projectId: string }) {
   const [renameTarget, setRenameTarget] = useState<Conversation | null>(null);
   const [renameTitle, setRenameTitle] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
+  const [deletedDocuments, setDeletedDocuments] = useState<{
+    projectId: string;
+    ids: ReadonlySet<string>;
+  } | null>(null);
   const deletedDocumentIdsRef = useRef(new Set<string>());
   const hasPendingDocuments = documents.some(
     (item) =>
@@ -191,7 +195,7 @@ export default function ProjectDetail({ projectId }: { projectId: string }) {
   }, [getToken, pageRevision, projectId, revision, userId]);
 
   useEffect(() => {
-    deletedDocumentIdsRef.current.clear();
+    deletedDocumentIdsRef.current = new Set();
   }, [projectId]);
 
   useEffect(() => {
@@ -226,7 +230,7 @@ export default function ProjectDetail({ projectId }: { projectId: string }) {
   }
 
   useEffect(() => {
-    if (project?.rag_strategy !== "index_tree" || !documents.length) {
+    if (!documents.length) {
       return;
     }
     let active = true;
@@ -246,20 +250,6 @@ export default function ProjectDetail({ projectId }: { projectId: string }) {
         );
         if (!active) return;
         setTreeStatus(status);
-        if (status) {
-          const processingStatus =
-            status.status === "completed" || status.status === "failed"
-              ? status.status
-              : "processing";
-          setDocuments((current) =>
-            current.map((document) => ({
-              ...document,
-              processing_status: processingStatus,
-              processing_error:
-                status.status === "failed" ? status.error_message : null,
-            })),
-          );
-        }
         if (
           !status ||
           status.status === "pending" ||
@@ -276,10 +266,10 @@ export default function ProjectDetail({ projectId }: { projectId: string }) {
       active = false;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [documents.length, getToken, project?.rag_strategy, projectId, revision]);
+  }, [documents.length, getToken, projectId, revision]);
 
   useEffect(() => {
-    if (project?.rag_strategy !== "vector" || !hasPendingDocuments) return;
+    if (!hasPendingDocuments) return;
     let active = true;
     let timer: number | undefined;
     const refreshDocuments = async () => {
@@ -318,7 +308,7 @@ export default function ProjectDetail({ projectId }: { projectId: string }) {
       active = false;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [getToken, hasPendingDocuments, project?.rag_strategy, projectId]);
+  }, [getToken, hasPendingDocuments, projectId]);
 
   async function changeRagStrategy(strategy: "vector" | "index_tree") {
     if (!project || strategySaving || project.rag_strategy === strategy) return;
@@ -501,7 +491,8 @@ export default function ProjectDetail({ projectId }: { projectId: string }) {
           `documents:${projectId}`,
           `workspace:${projectId}`,
         ]);
-        deletedDocumentIdsRef.current.add(target.id);
+        deletedDocumentIdsRef.current = new Set([...deletedDocumentIdsRef.current, target.id]);
+        setDeletedDocuments({ projectId, ids: deletedDocumentIdsRef.current });
         setDocuments((current) =>
           current.filter((item) => item.id !== target.id),
         );
@@ -538,15 +529,11 @@ export default function ProjectDetail({ projectId }: { projectId: string }) {
   }
 
   const treeIndexPending =
-    project?.rag_strategy === "index_tree" &&
     documents.length > 0 &&
     (!treeStatus ||
       treeStatus.status === "pending" ||
       treeStatus.status === "processing");
-  const indexing =
-    project?.rag_strategy === "index_tree"
-      ? treeIndexPending
-      : hasPendingDocuments;
+  const indexing = treeIndexPending || hasPendingDocuments;
   const hasSearchableDocuments =
     project?.rag_strategy === "index_tree"
       ? treeStatus?.status === "completed"
@@ -796,8 +783,10 @@ export default function ProjectDetail({ projectId }: { projectId: string }) {
               </Box>
               <Box sx={{ p: 1.5 }}>
                 <FileUpload
+                  key={projectId}
                   projectId={projectId}
-                  ragStrategy={project.rag_strategy}
+                  indexing={indexing}
+                  deletedDocumentIds={deletedDocuments?.projectId === projectId ? deletedDocuments.ids : undefined}
                   getToken={getToken}
                   onUploaded={() => {
                     invalidateGraphqlCache([

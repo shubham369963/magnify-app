@@ -18,6 +18,20 @@ test('records strategy outcomes and measured stages in the Prometheus registry',
   assert.match(output, /magnify_chat_requests_total\{[^}]*provider="ollama"[^}]*strategy="vector"[^}]*outcome="success"/);
 });
 
+test('long ingestion and dependency calls have finite buckets beyond the old percentile ceilings', async () => {
+  const dependency = metrics.registry.getSingleMetric('magnify_dependency_duration_seconds');
+  dependency.observe({ system: 'latency_budget_test', operation: 'batch', outcome: 'success' }, 130);
+  const values = (await dependency.get()).values.filter((value) => value.labels.system === 'latency_budget_test');
+  assert.equal(values.find((value) => value.labels.le === 60).value, 0);
+  assert.equal(values.find((value) => value.labels.le === 300).value, 1);
+
+  const stage = metrics.registry.getSingleMetric('magnify_ingestion_stage_duration_seconds');
+  stage.observe({ strategy: 'vector', stage: 'long_caption_test' }, 720);
+  const stages = (await stage.get()).values.filter((value) => value.labels.stage === 'long_caption_test');
+  assert.equal(stages.find((value) => value.labels.le === 600).value, 0);
+  assert.equal(stages.find((value) => value.labels.le === 1200).value, 1);
+});
+
 test('records dependency calls, payload sizes, strategy-specific work, and trace context', async () => {
   await runWithTraceContext({ traceId: 'trace-test', requestId: 'request-test' }, async () => {
     assert.equal(getTraceContext().traceId, 'trace-test');

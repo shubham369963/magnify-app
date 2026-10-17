@@ -2,6 +2,8 @@ import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { metrics } from '../observability/metrics.js';
 import { getTraceContext } from '../observability/trace-context.js';
 
+const STORAGE_BATCH_SIZE = 1000;
+
 @Injectable()
 export class SupabaseService {
   private get config() {
@@ -95,16 +97,49 @@ export class SupabaseService {
   }
 
   async deleteObject(path: string): Promise<void> {
+    await this.deleteObjects([path]);
+  }
+
+  async deleteObjects(paths: readonly string[]): Promise<void> {
     const bucket = encodeURIComponent(process.env.SUPABASE_STORAGE_BUCKET || 'documents');
-    await this.storageRequest(`/object/${bucket}`, {
-      method: 'DELETE',
-      headers: this.headers({ 'content-type': 'application/json' }),
-      body: JSON.stringify({ prefixes: [path] }),
-    });
+    for (let index = 0; index < paths.length; index += STORAGE_BATCH_SIZE) {
+      await this.storageRequest(`/object/${bucket}`, {
+        method: 'DELETE',
+        headers: this.headers({ 'content-type': 'application/json' }),
+        body: JSON.stringify({ prefixes: paths.slice(index, index + STORAGE_BATCH_SIZE) }),
+      });
+    }
+  }
+
+  /** Recursively lists every object path below a folder (without a trailing slash). */
+  async listObjectPaths(folder: string): Promise<string[]> {
+    const bucket = encodeURIComponent(process.env.SUPABASE_STORAGE_BUCKET || 'documents');
+    const paths: string[] = [];
+    const folders = [folder];
+    while (folders.length) {
+      const prefix = folders.pop()!;
+      for (let offset = 0; ; offset += STORAGE_BATCH_SIZE) {
+        const response = await this.storageRequest(`/object/list/${bucket}`, {
+          method: 'POST',
+          headers: this.headers({ 'content-type': 'application/json' }),
+          body: JSON.stringify({ prefix, limit: STORAGE_BATCH_SIZE, offset, sortBy: { column: 'name', order: 'asc' } }),
+        });
+        const entries = await response.json() as Array<{ name: string; id: string | null }>;
+        for (const entry of entries) {
+          // Supabase reports folders as entries without an object id.
+          if (entry.id) paths.push(`${prefix}/${entry.name}`);
+          else folders.push(`${prefix}/${entry.name}`);
+        }
+        if (entries.length < STORAGE_BATCH_SIZE) break;
+      }
+    }
+    return paths;
   }
 
   private async storageRequest(path: string, init: RequestInit): Promise<Response> {
-    const operation = path.startsWith('/object/sign/') ? 'sign' : init.method === 'POST' ? 'upload' : init.method === 'DELETE' ? 'delete' : 'download';
+    const operation = path.startsWith('/object/sign/') ? 'sign'
+      : path.startsWith('/object/list/') ? 'list'
+        : init.method === 'POST' ? 'upload' : init.method === 'DELETE' ? 'delete' : 'download';
     const requestBytes = payloadByteLength(init.body);
     const finish = metrics.startDependency('supabase_storage', operation, requestBytes);
     try {

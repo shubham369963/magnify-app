@@ -1,4 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
+import { UnrecoverableError } from 'bullmq';
 import { Document } from '@langchain/core/documents';
 import { PDFLoader } from '@langchain/community/document_loaders/fs/pdf';
 import { QdrantVectorStore } from '@langchain/qdrant';
@@ -11,14 +12,17 @@ import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { collectionName, createQdrantClient, deleteDocumentVectors, ensureQdrantPayloadIndexes } from '../config/settings.js';
 import { createOllamaCloudVisionModel } from '../config/ollama-cloud.js';
 import { GeminiEmbeddings } from '../config/gemini-embeddings.js';
+import { isProviderQuotaFailure, ProviderQuotaError } from '../shared-utils/provider-quota-error.js';
 import { SupabaseService } from '../database/supabase.service.js';
 import type { ProjectDocument } from '../entities/project-document.entity.js';
 import { DocumentProcessingStatus } from '../enums/document-processing-status.enum.js';
-import { imagePagesFromListing, splitPageText, stableVectorPointId } from './pdf-chunking.utils.js';
-import { createIndexSectionId, createSourcePassages, groupSourcePassagesBySection, linkAdjacentTreeEvidence, normalizeStructuredPageText, orderSourcePassages, selectTreeDocuments, summarizeSourcePassages, validateProjectIndexTree, type ProjectIndexTreeNode } from './index-tree.utils.js';
-import { metrics } from '../observability/metrics.js';
+import { selectImagePages, splitPageText, stableVectorPointId } from './pdf-chunking.utils.js';
+import { createDocumentTreeNode, linkAdjacentTreeEvidence, normalizeStructuredPageText, selectTreeDocuments, validateProjectIndexTree, type ProjectIndexTreeNode } from './index-tree.utils.js';
+import { metrics, type IngestionStrategy } from '../observability/metrics.js';
 import { withOperationLog } from '../shared-utils/operation-logger.js';
 import { deleteVectorIndexCheckpoint, loadVectorIndexCheckpoint, saveVectorIndexCheckpoint } from './vector-index-checkpoint.js';
+import { readPdfProcessingSettings } from '../config/pdf-processing.js';
+import { PdfImageProcessor } from './pdf-image-processing.js';
 
 export interface UploadJobData {
   documentId: string;
@@ -40,18 +44,32 @@ export interface ProjectTreeJobData {
 }
 
 export interface IndexingProgress {
-  stage: 'loading' | 'building_tree' | 'embedding' | 'storing' | 'completed';
+  stage: 'loading' | 'captioning' | 'building_tree' | 'embedding' | 'storing' | 'completed' | 'failed';
   percentage: number;
+  error?: string;
 }
 
+export const QUOTA_REMOVAL_MESSAGE_SUFFIX = 'The PDF was removed. Wait for the quota to reset or increase it, then upload the PDF again.';
+
 const execFileAsync = promisify(execFile);
+const DOCUMENT_EXISTENCE_CHECK_INTERVAL_MS = 5000;
+
+export class DocumentRemovedError extends UnrecoverableError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DocumentRemovedError';
+  }
+}
 
 @Injectable()
 export class PdfService {
   private readonly logger = new Logger(PdfService.name);
   private readonly qdrantClient = createQdrantClient();
   private vectorStorePromise?: Promise<QdrantVectorStore>;
+  private embeddingModel?: GeminiEmbeddings;
   private payloadIndexesPromise?: Promise<void>;
+  private readonly pdfSettings = readPdfProcessingSettings();
+  private readonly imageProcessor = new PdfImageProcessor(this.pdfSettings.imageConcurrency, this.pdfSettings.renderConcurrency);
   private get visionModel() {
     return createOllamaCloudVisionModel();
   }
@@ -62,20 +80,11 @@ export class PdfService {
     return withOperationLog(this.logger, 'document.processing', {
       documentId: upload.documentId,
       projectId: upload.projectId,
-      strategy: upload.strategy ?? 'vector',
+      strategy: 'both',
     }, () => this.processUpload(upload, reportProgress));
   }
 
   private async processUpload(upload: UploadJobData, reportProgress?: (progress: IndexingProgress) => Promise<void>) {
-    if (upload.strategy === 'index_tree') {
-      const generation = upload.generation ?? await this.supabase.rpc<number>('request_project_index_tree', {
-        p_project_id: upload.projectId,
-        p_owner_clerk_id: upload.ownerId,
-      });
-      await this.processProjectTree({ ...upload, generation }, reportProgress);
-      return;
-    }
-
     const documentRows = await this.supabase.select<ProjectDocument>(
       'documents',
       new URLSearchParams({
@@ -87,14 +96,25 @@ export class PdfService {
       }),
     );
     const document = documentRows[0];
-    if (!document) throw new Error('Document metadata is missing for the queued upload.');
+    if (!document) {
+      await deleteVectorIndexCheckpoint(upload.documentId);
+      throw new DocumentRemovedError('PDF was removed before indexing started.');
+    }
 
-    const ingestion = metrics.startIngestion('vector');
-    metrics.addIngestionUnits('vector', 'documents');
+    let lastExistenceCheck = Date.now();
+    const assertNotRemoved = async (force = false) => {
+      if (!force && Date.now() - lastExistenceCheck < DOCUMENT_EXISTENCE_CHECK_INTERVAL_MS) return;
+      lastExistenceCheck = Date.now();
+      await this.assertDocumentExists(upload);
+    };
+    const ingestion = metrics.startIngestion('both');
+    metrics.addIngestionUnits('both', 'documents');
     let tempDirectory: string | undefined;
+    let committed = false;
     try {
       await this.setStatus(upload, DocumentProcessingStatus.Processing, null);
       let docs: Document[];
+      let documentNode: ProjectIndexTreeNode;
       const checkpointIdentity = {
         documentId: document.id,
         projectId: document.project_id,
@@ -102,26 +122,26 @@ export class PdfService {
         storagePath: document.storage_path,
       };
       const checkpoint = await loadVectorIndexCheckpoint(checkpointIdentity);
-      if (checkpoint) {
+      if (checkpoint?.documentNode) {
         docs = checkpoint.documents.map((item) => new Document(item));
+        documentNode = checkpoint.documentNode;
         this.logger.log(JSON.stringify({
           event: 'document.processing.resume',
           documentId: document.id,
           projectId: document.project_id,
-          stage: 'vector_indexing',
+          stage: 'indexing_both',
           passageCount: docs.length,
         }));
-        await reportProgress?.({ stage: 'storing', percentage: 75 });
       } else {
         const tempDirectoryPath = await mkdtemp(join(tmpdir(), 'magnify-pdf-'));
         tempDirectory = tempDirectoryPath;
         const pdfPath = join(tempDirectoryPath, 'document.pdf');
         await reportProgress?.({ stage: 'loading', percentage: 5 });
-        const file = await metrics.trackStage('vector', 'storage_download', () => this.supabase.downloadObject(document.storage_path));
+        const file = await metrics.trackStage('both', 'storage_download', () => this.supabase.downloadObject(document.storage_path));
         await writeFile(pdfPath, file, { flag: 'wx' });
         const loader = new PDFLoader(pdfPath);
-        const pages = await metrics.trackStage('vector', 'pdf_text_extraction', () => loader.load());
-        metrics.addIngestionUnits('vector', 'pages', pages.length);
+        const pages = await metrics.trackStage('both', 'pdf_text_extraction', () => loader.load());
+        metrics.addIngestionUnits('both', 'pages', pages.length);
         docs = metrics.trackStageSync('vector', 'chunking', () => {
           return pages.flatMap((page, index) => {
             const pageNumber = Number(page.metadata.loc?.pageNumber) || index + 1;
@@ -140,48 +160,58 @@ export class PdfService {
             }));
           });
         });
-        const { stdout: imageListing } = await metrics.trackStage('vector', 'image_discovery', () =>
+        const { stdout: imageListing } = await metrics.trackStage('both', 'image_discovery', () =>
           execFileAsync('pdfimages', ['-list', pdfPath], { maxBuffer: 10 * 1024 * 1024 }));
-        const imagePages = imagePagesFromListing(imageListing);
-        await reportProgress?.({ stage: 'embedding', percentage: 25 });
-        await metrics.trackStage('vector', 'image_captioning', async () => {
-          for (const [index, pageNumber] of imagePages.entries()) {
-            const imagePrefix = join(tempDirectoryPath, `page-${pageNumber}`);
-            await metrics.trackStage('vector', 'image_rendering', () => execFileAsync('pdftoppm', [
-              '-f', String(pageNumber), '-l', String(pageNumber), '-singlefile',
-              '-scale-to', '1024', '-png', pdfPath, imagePrefix,
-            ]));
-            const image = await readFile(`${imagePrefix}.png`);
-            const caption = await metrics.trackModelCall('vector', 'image_caption', () => this.captionImage(image));
-            if (caption) {
-              const page = pages[pageNumber - 1];
-              docs.push(new Document({
-                pageContent: caption,
-                metadata: {
-                  ...page?.metadata,
-                  page_number: pageNumber,
-                  chunk_index: 0,
-                  source: document.file_name,
-                  document_id: document.id,
-                  project_id: document.project_id,
-                  owner_clerk_id: document.owner_clerk_id,
-                  content_type: 'image_caption',
-                  loc: page?.metadata.loc ?? { pageNumber },
-                },
-              }));
-              metrics.addIngestionUnits('vector', 'image_captions');
-            }
+        const imagePages = this.selectCaptionPages(imageListing, 'both', document.id);
+        await assertNotRemoved(true);
+        await reportProgress?.({ stage: 'captioning', percentage: 20 });
+        const captions = await this.captionImagePages(
+          imagePages, pdfPath, tempDirectoryPath, 'both',
+          async (completed) => {
+            // Stop spending vision-model calls once the user deletes the PDF.
+            await assertNotRemoved();
             await reportProgress?.({
-              stage: 'embedding',
-              percentage: 25 + Math.floor(((index + 1) / imagePages.length) * 40),
+              stage: 'captioning',
+              percentage: 20 + Math.floor((completed / imagePages.length) * 35),
             });
+          },
+        );
+        await assertNotRemoved(true);
+        for (const { pageNumber, caption } of captions) {
+          if (caption) {
+            const page = pages[pageNumber - 1];
+            docs.push(new Document({
+              pageContent: caption,
+              metadata: {
+                ...page?.metadata,
+                page_number: pageNumber,
+                chunk_index: 0,
+                source: document.file_name,
+                document_id: document.id,
+                project_id: document.project_id,
+                owner_clerk_id: document.owner_clerk_id,
+                content_type: 'image_caption',
+                loc: page?.metadata.loc ?? { pageNumber },
+              },
+            }));
           }
-        });
+        }
+        await reportProgress?.({ stage: 'building_tree', percentage: 60 });
+        documentNode = metrics.trackStageSync('index_tree', 'tree_generation', () => createDocumentTreeNode(
+          document,
+          pages.flatMap((page, index) => normalizeStructuredPageText(page.pageContent)
+            ? [{ pageNumber: Number(page.metadata.loc?.pageNumber) || index + 1, text: page.pageContent }]
+            : []),
+          captions,
+        ));
         await saveVectorIndexCheckpoint({
           ...checkpointIdentity,
           documents: docs.map(({ pageContent, metadata }) => ({ pageContent, metadata })),
+          documentNode,
         });
       }
+      this.validateDocumentNode(documentNode, document.id);
+      metrics.addIngestionUnits('index_tree', 'passages', countTreeNodes(documentNode, 'passage'));
       metrics.addIngestionUnits('vector', 'passages', docs.length);
       const vectorStore = await metrics.trackStage('vector', 'vector_store_setup', async () => {
         const store = await this.getVectorStore();
@@ -190,8 +220,30 @@ export class PdfService {
       });
       await this.assertDocumentExists(upload);
       await deleteDocumentVectors(document.id);
-      await reportProgress?.({ stage: 'storing', percentage: 75 });
+      await reportProgress?.({ stage: 'embedding', percentage: 65 });
       if (docs.length) {
+        const vectors = await metrics.trackStage('vector', 'embedding', () => this.getEmbeddings().embedDocuments(
+          docs.map((doc) => doc.pageContent),
+          {
+            checkpoint: checkpoint?.documentNode ? checkpoint.embeddings : undefined,
+            saveCheckpoint: async (embeddings) => {
+              await this.assertDocumentExists(upload);
+              await saveVectorIndexCheckpoint({
+                ...checkpointIdentity,
+                documents: docs.map(({ pageContent, metadata }) => ({ pageContent, metadata })),
+                documentNode,
+                embeddings,
+              });
+              try {
+                await this.assertDocumentExists(upload);
+              } catch (error) {
+                if (error instanceof DocumentRemovedError) await deleteVectorIndexCheckpoint(document.id);
+                throw error;
+              }
+            },
+          },
+        ));
+        await this.assertDocumentExists(upload);
         const pointIds = docs.map((doc, index) => stableVectorPointId(
           document.id,
           Number(doc.metadata.page_number) || index + 1,
@@ -199,7 +251,7 @@ export class PdfService {
           doc.pageContent,
         ));
         try {
-          await metrics.trackDependency('qdrant', 'upsert', () => vectorStore.addDocuments(docs, { ids: pointIds }));
+          await metrics.trackDependency('qdrant', 'upsert', () => vectorStore.addVectors(vectors, docs, { ids: pointIds }));
           metrics.observeVectorOperation('vector_write', 'success');
         } catch (error) {
           metrics.observeVectorOperation('vector_write', 'error');
@@ -207,15 +259,40 @@ export class PdfService {
         }
       }
       await this.assertDocumentExists(upload);
-      await this.setStatus(upload, DocumentProcessingStatus.Completed, null);
+      await reportProgress?.({ stage: 'storing', percentage: 90 });
+      await metrics.trackStage('index_tree', 'tree_persistence', () => this.supabase.rpc('complete_document_indexing', {
+        p_project_id: upload.projectId,
+        p_owner_clerk_id: upload.ownerId,
+        p_document_id: document.id,
+        p_document_node: documentNode,
+      }));
+      committed = true;
       await reportProgress?.({ stage: 'completed', percentage: 100 });
       await this.logCleanupFailure('remove completed vector indexing checkpoint', () =>
         deleteVectorIndexCheckpoint(document.id));
       ingestion.setOutcome('success');
-    } catch (error) {
-      await this.logCleanupFailure('delete partial document vectors', () => deleteDocumentVectors(document.id));
-      await this.logCleanupFailure('mark document as failed', () =>
-        this.setStatus(upload, DocumentProcessingStatus.Failed, 'PDF processing failed. Please retry the upload.'));
+    } catch (caught) {
+      const error = !(caught instanceof ProviderQuotaError) && isProviderQuotaFailure(caught)
+        ? new ProviderQuotaError('AI provider', caught instanceof Error ? caught.message : String(caught))
+        : caught;
+      if (!committed && error instanceof ProviderQuotaError) {
+        await this.discardQuotaFailedDocument(upload, document, error, reportProgress);
+        throw error;
+      }
+      if (!committed) {
+        await this.logCleanupFailure('delete partial document vectors', () => deleteDocumentVectors(document.id));
+        await this.logCleanupFailure('mark combined document indexing as failed', () =>
+          this.supabase.rpc('fail_document_indexing', {
+            p_project_id: upload.projectId,
+            p_owner_clerk_id: upload.ownerId,
+            p_document_id: document.id,
+            p_error_message: 'PDF indexing failed. Please retry the upload.',
+          }));
+        if (error instanceof DocumentRemovedError) {
+          await this.logCleanupFailure('remove deleted document vector checkpoint', () =>
+            deleteVectorIndexCheckpoint(document.id));
+        }
+      }
       throw error;
     } finally {
       try {
@@ -224,6 +301,58 @@ export class PdfService {
         ingestion.finish();
       }
     }
+  }
+
+  /** Quota failures stop indexing and remove the upload; the job progress keeps the reason for the UI. */
+  private async discardQuotaFailedDocument(
+    upload: UploadJobData,
+    document: ProjectDocument,
+    error: ProviderQuotaError,
+    reportProgress?: (progress: IndexingProgress) => Promise<void>,
+  ) {
+    const message = `${error.message} ${QUOTA_REMOVAL_MESSAGE_SUFFIX}`;
+    this.logger.warn(JSON.stringify({
+      event: 'document.processing.quota_exceeded',
+      documentId: document.id,
+      projectId: document.project_id,
+      provider: error.provider,
+      detail: error.detail?.slice(0, 500),
+    }));
+    await this.logCleanupFailure('record quota failure for the upload status', async () =>
+      reportProgress?.({ stage: 'failed', percentage: 0, error: message }));
+    try {
+      await this.supabase.rpc('discard_document_indexing', {
+        p_project_id: upload.projectId,
+        p_owner_clerk_id: upload.ownerId,
+        p_document_id: document.id,
+      });
+    } catch (removalError) {
+      const detail = removalError instanceof Error ? removalError.message : String(removalError);
+      this.logger.warn(`Could not remove quota-failed document: ${detail}`);
+      await this.logCleanupFailure('mark quota-failed document as failed', () => this.supabase.rpc('fail_document_indexing', {
+        p_project_id: upload.projectId,
+        p_owner_clerk_id: upload.ownerId,
+        p_document_id: document.id,
+        p_error_message: error.message,
+      }));
+      await this.logCleanupFailure('delete partial document vectors', () => deleteDocumentVectors(document.id));
+      return;
+    }
+    await Promise.all([
+      this.logCleanupFailure('delete quota-failed document vectors', () => deleteDocumentVectors(document.id)),
+      this.logCleanupFailure('delete quota-failed PDF', () => this.supabase.deleteObject(document.storage_path)),
+      this.logCleanupFailure('remove quota-failed checkpoint', () => deleteVectorIndexCheckpoint(document.id)),
+    ]);
+  }
+
+  private validateDocumentNode(documentNode: ProjectIndexTreeNode, documentId: string) {
+    validateProjectIndexTree({
+      id: 'validation-root',
+      type: 'root',
+      title: 'Document index',
+      source_document_ids: [documentId],
+      children: [documentNode],
+    }, [documentId]);
   }
 
   async processProjectTree(
@@ -291,13 +420,6 @@ export class PdfService {
       owner_clerk_id: `eq.${upload.ownerId}`,
       generation: `eq.${upload.generation}`,
     }), { status: 'processing', error_message: null, updated_at: new Date().toISOString() });
-    if (documentsToProcess.length) {
-      await this.supabase.update('documents', new URLSearchParams({
-        project_id: `eq.${upload.projectId}`,
-        owner_clerk_id: `eq.${upload.ownerId}`,
-        id: `in.(${documentsToProcess.map((document) => document.id).join(',')})`,
-      }), { processing_status: DocumentProcessingStatus.Processing, processing_error: null, updated_at: new Date().toISOString() });
-    }
     const sendProgress = async (progress: IndexingProgress) => {
       await reportProgress?.(progress);
       await this.supabase.update('project_index_trees', new URLSearchParams({
@@ -324,99 +446,18 @@ export class PdfService {
           const text = normalizeStructuredPageText(page.pageContent);
           return text ? [{ pageNumber: Number(page.metadata.loc?.pageNumber) || index + 1, text: page.pageContent }] : [];
         });
-        const passages = createSourcePassages(pages);
         const { stdout: imageListing } = await metrics.trackStage('index_tree', 'image_discovery', () =>
           execFileAsync('pdfimages', ['-list', pdfPath], { maxBuffer: 10 * 1024 * 1024 }));
-        const imagePages = imagePagesFromListing(imageListing);
-        await metrics.trackStage('index_tree', 'image_captioning', async () => {
-          for (const pageNumber of imagePages) {
-            const imagePrefix = join(directory, `tree-page-${pageNumber}`);
-            await metrics.trackStage('index_tree', 'image_rendering', () => execFileAsync('pdftoppm', [
-              '-f', String(pageNumber), '-l', String(pageNumber), '-singlefile',
-              '-scale-to', '1024', '-png', pdfPath, imagePrefix,
-            ]));
-            const image = await readFile(`${imagePrefix}.png`);
-            const caption = await metrics.trackModelCall('index_tree', 'image_caption', () => this.captionImage(image));
-            if (caption) {
-              passages.push({
-                id: `P${String(passages.length + 1).padStart(6, '0')}`,
-                sourceOrder: passages.length + 1,
-                page: pageNumber,
-                content: caption,
-                normalizedContent: normalizeStructuredPageText(caption) ?? caption,
-                contentType: 'image_caption',
-              });
-              metrics.addIngestionUnits('index_tree', 'image_captions');
-            }
-          }
-        });
-        orderSourcePassages(passages, document.id);
-        if (!passages.length) {
-          throw new Error(`${document.file_name} has no extractable text or image captions.`);
-        }
-        metrics.addIngestionUnits('index_tree', 'passages', passages.length);
-
-        const passagesById = new Map(passages.map((passage) => [passage.id, passage]));
-        const collectPassageIds = (section: ReturnType<typeof groupSourcePassagesBySection>[number]): string[] => [
-          ...section.passageIds,
-          ...(section.children ?? []).flatMap(collectPassageIds),
-        ];
-        let sectionIndex = 0;
-        const createSectionNode = (
-          section: ReturnType<typeof groupSourcePassagesBySection>[number],
-          depth: number,
-        ): ProjectIndexTreeNode => {
-          const sectionPassages = collectPassageIds(section).flatMap((id) => {
-            const passage = passagesById.get(id);
-            return passage ? [passage] : [];
-          }).sort((left, right) => left.sourceOrder - right.sourceOrder);
-          const sectionPages = sectionPassages.map((passage) => passage.page);
-          return {
-            id: createIndexSectionId(document.id, ++sectionIndex),
-            type: depth === 0 ? 'section' : 'subsection',
-            title: section.title,
-            summary: summarizeSourcePassages(sectionPassages),
-            start_page: Math.min(...sectionPages),
-            end_page: Math.max(...sectionPages),
-            children: [
-              ...(section.children ?? []).map((child) => createSectionNode(child, depth + 1)),
-              ...section.passageIds.flatMap((id) => {
-                const passage = passagesById.get(id);
-                return passage ? [{
-              id: `evidence-${document.id}-${passage.id}`,
-              type: 'passage',
-              title: `Page ${passage.page}`,
-              document_id: document.id,
-              source: document.file_name,
-              page: passage.page,
-              source_order: passage.sourceOrder,
-              continues_from_previous: passage.continuesFromPrevious,
-              continues_to_next: passage.continuesToNext,
-              content_type: passage.contentType ?? 'text',
-              content_reference: passage.content,
-              normalized_content: passage.normalizedContent ?? passage.content,
-                }] : [];
-              }),
-            ],
-          };
-        };
-        const sectionNodes = metrics.trackStageSync('index_tree', 'tree_generation', () =>
-          groupSourcePassagesBySection(passages).map((section) => createSectionNode(section, 0)));
+        const imagePages = this.selectCaptionPages(imageListing, 'index_tree', document.id);
+        const captions = await this.captionImagePages(imagePages, pdfPath, directory, 'index_tree');
+        const documentNode = metrics.trackStageSync('index_tree', 'tree_generation', () =>
+          createDocumentTreeNode(document, pages, captions));
+        metrics.addIngestionUnits('index_tree', 'passages', countTreeNodes(documentNode, 'passage'));
         await sendProgress({
           stage: 'building_tree',
           percentage: 20 + Math.floor(((documentIndex + 1) / documentsToProcess.length) * 65),
         });
-        documentNodes.push({
-          id: `document-${document.id}`,
-          type: 'document',
-          title: document.file_name,
-          summary: `${pages.length} pages of extracted text and ${passages.filter((passage) => passage.contentType === 'image_caption').length} image captions`,
-          document_id: document.id,
-          source: document.file_name,
-          start_page: Math.min(...passages.map((passage) => passage.page)),
-          end_page: Math.max(...passages.map((passage) => passage.page)),
-          children: sectionNodes,
-        });
+        documentNodes.push(documentNode);
       }
 
       const latestRows = await this.supabase.select<{ generation: number }>(
@@ -462,10 +503,6 @@ export class PdfService {
             + (document.children ?? []).reduce((sectionCount, section) => sectionCount + (section.children?.length ?? 0), 0), 0),
         },
       }));
-      await this.supabase.update('documents', new URLSearchParams({
-        project_id: `eq.${upload.projectId}`,
-        owner_clerk_id: `eq.${upload.ownerId}`,
-      }), { processing_status: DocumentProcessingStatus.Completed, processing_error: null, updated_at: new Date().toISOString() });
       await sendProgress({ stage: 'completed', percentage: 100 });
       ingestion.setOutcome('success');
     } catch (error) {
@@ -485,13 +522,6 @@ export class PdfService {
           p_generation: upload.generation,
           p_error_message: message,
         }));
-        if (processingDocumentIds.size) {
-          await this.logCleanupFailure('mark project documents as failed', () => this.supabase.update('documents', new URLSearchParams({
-            project_id: `eq.${upload.projectId}`,
-            owner_clerk_id: `eq.${upload.ownerId}`,
-            id: `in.(${[...processingDocumentIds].join(',')})`,
-          }), { processing_status: DocumentProcessingStatus.Failed, processing_error: message.slice(0, 1000), updated_at: new Date().toISOString() }));
-        }
         throw error;
       }
       ingestion.setOutcome('stale');
@@ -530,14 +560,6 @@ export class PdfService {
       p_generation: upload.generation,
       p_error_message: message,
     });
-    await this.supabase.update('documents', new URLSearchParams({
-      project_id: `eq.${upload.projectId}`,
-      owner_clerk_id: `eq.${upload.ownerId}`,
-    }), {
-      processing_status: DocumentProcessingStatus.Failed,
-      processing_error: message.slice(0, 1000),
-      updated_at: new Date().toISOString(),
-    });
   }
 
   private async setStatus(upload: UploadJobData, status: ProjectDocument['processing_status'], error: string | null) {
@@ -550,6 +572,58 @@ export class PdfService {
       }),
       { processing_status: status, processing_error: error, updated_at: new Date().toISOString() },
     );
+  }
+
+  private selectCaptionPages(imageListing: string, strategy: IngestionStrategy, documentId: string): number[] {
+    const selection = selectImagePages(imageListing, this.pdfSettings.imageFilter);
+    metrics.addIngestionUnits(strategy, 'image_pages', selection.pages.length);
+    metrics.addIngestionUnits(strategy, 'skipped_images', selection.skippedImages);
+    this.logger.log(JSON.stringify({
+      event: 'document.processing.image_pages_selected',
+      strategy,
+      documentId,
+      images: selection.images,
+      skippedImages: selection.skippedImages,
+      imagePages: selection.pages.length,
+    }));
+    return selection.pages;
+  }
+
+  private async captionImagePages(
+    pageNumbers: number[],
+    pdfPath: string,
+    directory: string,
+    strategy: IngestionStrategy,
+    onProgress?: (completed: number) => Promise<void>,
+  ) {
+    return metrics.trackStage(strategy, 'image_captioning', () => this.imageProcessor.process(
+      pageNumbers,
+      async (pageNumber) => {
+        const imagePrefix = join(directory, `page-${pageNumber}`);
+        return metrics.trackStage(strategy, 'image_rendering', async () => {
+          await execFileAsync('pdftoppm', [
+            '-f', String(pageNumber), '-l', String(pageNumber), '-singlefile',
+            '-scale-to', '1024', '-png', pdfPath, imagePrefix,
+          ]);
+          const imagePath = `${imagePrefix}.png`;
+          const image = await readFile(imagePath);
+          await rm(imagePath);
+          return image;
+        });
+      },
+      async (image) => {
+        const caption = await metrics.trackModelCall(strategy, 'image_caption', () => this.captionImage(image))
+          .catch((error: unknown) => {
+            if (isProviderQuotaFailure(error) && !(error instanceof ProviderQuotaError)) {
+              throw new ProviderQuotaError('Image captioning', error instanceof Error ? error.message : String(error));
+            }
+            throw error;
+          });
+        if (caption) metrics.addIngestionUnits(strategy, 'image_captions');
+        return caption;
+      },
+      onProgress,
+    ));
   }
 
   private async captionImage(image: Buffer): Promise<string> {
@@ -567,7 +641,7 @@ export class PdfService {
     if (!this.vectorStorePromise) {
       this.vectorStorePromise = metrics.trackDependency('qdrant', 'collection_initialize', () =>
         QdrantVectorStore.fromExistingCollection(
-          new GeminiEmbeddings(),
+          this.getEmbeddings(),
           { client: this.qdrantClient, collectionName },
         ));
     }
@@ -577,6 +651,11 @@ export class PdfService {
       this.vectorStorePromise = undefined;
       throw error;
     }
+  }
+
+  private getEmbeddings(): GeminiEmbeddings {
+    this.embeddingModel ??= new GeminiEmbeddings();
+    return this.embeddingModel;
   }
 
   private async ensurePayloadIndexes(): Promise<void> {
@@ -603,7 +682,7 @@ export class PdfService {
         limit: '1',
       }),
     );
-    if (!rows[0]) throw new Error('PDF was removed before indexing completed.');
+    if (!rows[0]) throw new DocumentRemovedError('PDF was removed before indexing completed.');
   }
 
   private async logCleanupFailure(action: string, cleanup: () => Promise<unknown>): Promise<void> {
@@ -616,13 +695,13 @@ export class PdfService {
   }
 }
 
-function countTreeNodes(root: ProjectIndexTreeNode): number {
+function countTreeNodes(root: ProjectIndexTreeNode, type?: string): number {
   let count = 0;
   const pending = [root];
   while (pending.length) {
     const node = pending.pop();
     if (!node) continue;
-    count += 1;
+    if (type === undefined || node.type === type) count += 1;
     if (node.children) pending.push(...node.children);
   }
   return count;

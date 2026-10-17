@@ -1,5 +1,6 @@
 import { BadRequestException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { deleteDocumentVectors, deleteUserVectors } from '../config/settings.js';
+import { deleteVectorIndexCheckpoint } from '../document-service/vector-index-checkpoint.js';
 import { SupabaseService } from '../database/supabase.service.js';
 import type { Project } from '../entities/project.entity.js';
 import type { ProjectDocument } from '../entities/project-document.entity.js';
@@ -94,22 +95,39 @@ export class ProjectsService {
       for (const document of documents) {
         await deleteDocumentVectors(document.id);
         await this.supabase.deleteObject(document.storage_path);
+        await deleteVectorIndexCheckpoint(document.id);
       }
       await this.supabase.delete('projects', new URLSearchParams({ id: `eq.${projectId}`, owner_clerk_id: `eq.${ownerId}` }));
     });
   }
 
   async deleteUserData(ownerId: string): Promise<void> {
+    // The owner id becomes a storage prefix; reject anything that could widen it to other users.
+    if (!/^[A-Za-z0-9_-]+$/.test(ownerId)) throw new BadRequestException('Clerk user ID is invalid.');
     return withOperationLog(this.logger, 'user_data.delete', { ownerId }, async () => {
       const pageLimit = 500;
-      for (let offset = 0; ; offset += pageLimit) {
-        const documents = await this.supabase.select<Pick<ProjectDocument, 'id' | 'storage_path'>>(
-          'documents',
-          new URLSearchParams({ owner_clerk_id: `eq.${ownerId}`, select: 'id,storage_path', limit: String(pageLimit), offset: String(offset) }),
-        );
-        for (const document of documents) await this.supabase.deleteObject(document.storage_path);
+      const storagePaths = new Set<string>();
+      let lastId: string | undefined;
+      for (;;) {
+        const query = new URLSearchParams({
+          owner_clerk_id: `eq.${ownerId}`,
+          select: 'id,storage_path',
+          order: 'id.asc',
+          limit: String(pageLimit),
+        });
+        if (lastId) query.set('id', `gt.${lastId}`);
+        const documents = await this.supabase.select<Pick<ProjectDocument, 'id' | 'storage_path'>>('documents', query);
+        for (const document of documents) {
+          storagePaths.add(document.storage_path);
+          await deleteVectorIndexCheckpoint(document.id);
+        }
         if (documents.length < pageLimit) break;
+        lastId = documents.at(-1)!.id;
       }
+      // Also remove objects left behind by interrupted uploads or deletions.
+      for (const path of await this.supabase.listObjectPaths(ownerId)) storagePaths.add(path);
+      await this.supabase.deleteObjects([...storagePaths]);
+      // Cascades to documents, conversations, messages, and every index-tree table.
       await this.supabase.delete('projects', new URLSearchParams({ owner_clerk_id: `eq.${ownerId}` }));
       await deleteUserVectors(ownerId);
     });

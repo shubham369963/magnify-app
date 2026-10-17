@@ -4,6 +4,7 @@ const migrations = [
   '20261010_project_rag.sql',
   '20261015_index_tree_rag.sql',
   '20261016_project_index_tree.sql',
+  '20261017_shared_document_indexing.sql',
 ].map((fileName) => new URL(`../../migrations/${fileName}`, import.meta.url));
 
 try {

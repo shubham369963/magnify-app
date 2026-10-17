@@ -87,7 +87,7 @@ export class UploadService implements OnModuleDestroy {
     const checksum = createHash('sha256').update(file.buffer).digest('hex');
     let rowCreated = false;
     let objectCreated = false;
-    let vectorJobId: string | undefined;
+    let generation: number | undefined;
     try {
       await metrics.trackDependency('upload', 'storage_write', () =>
         this.supabase.uploadObject(storagePath, file.buffer, 'application/pdf'), file.size);
@@ -104,23 +104,23 @@ export class UploadService implements OnModuleDestroy {
         processing_status: DocumentProcessingStatus.Pending,
       }));
       rowCreated = true;
-      const vectorJob = await metrics.trackDependency('upload', 'vector_job_enqueue', () => this.queue.add('file-ready', { documentId, projectId, ownerId, strategy: 'vector', traceId, requestId }, {
+      generation = await this.requestProjectTreeGeneration(ownerId, projectId);
+      const job = await metrics.trackDependency('upload', 'indexing_job_enqueue', () => this.queue.add('document-index', { documentId, projectId, ownerId, traceId, requestId }, {
         jobId: documentId,
         attempts: 3,
         backoff: { type: 'exponential', delay: 2000 },
         removeOnComplete: 1000,
         removeOnFail: 1000,
       }));
-      vectorJobId = vectorJob.id;
-      await metrics.trackDependency('upload', 'index_tree_job_enqueue', () => this.scheduleProjectTree(ownerId, projectId, documentId, traceId, requestId));
-      return { message: 'uploaded', documentId, jobId: vectorJob.id };
+      return { message: 'uploaded', documentId, jobId: job.id };
     } catch (error) {
-      const failedJobId = vectorJobId;
-      if (failedJobId) {
-        await this.logCleanupFailure('remove queued upload job', async () => {
-          const vectorJob = await this.queue.getJob(failedJobId);
-          if (vectorJob && await vectorJob.getState() !== 'active') await vectorJob.remove();
-        });
+      if (generation !== undefined) {
+        await this.logCleanupFailure('mark project index enqueue as failed', () => this.supabase.rpc('fail_project_index_tree', {
+          p_project_id: projectId,
+          p_owner_clerk_id: ownerId,
+          p_generation: generation,
+          p_error_message: 'Could not enqueue document indexing.',
+        }));
       }
       if (rowCreated) {
         await this.logCleanupFailure('remove document row after upload failure', () =>
@@ -143,10 +143,22 @@ export class UploadService implements OnModuleDestroy {
       new URLSearchParams({ id: `eq.${jobId}`, owner_clerk_id: `eq.${ownerId}`, select: '*', limit: '1' }),
     );
     const document = documents[0];
-    if (!document || (job && job.data.ownerId !== ownerId)) throw new NotFoundException('Upload job not found.');
+    if (job && job.data.ownerId !== ownerId) throw new NotFoundException('Upload job not found.');
+    // The job id is the document id, so a missing row means the PDF was deleted.
+    if (!document) {
+      const progress = job?.progress as { stage?: unknown; error?: unknown } | undefined;
+      // Quota failures remove the PDF but leave the reason on the job so the UI can show it.
+      if (typeof progress === 'object' && progress !== null
+        && progress.stage === 'failed' && typeof progress.error === 'string') {
+        return { jobId, status: 'failed', progress: null, error: progress.error };
+      }
+      return { jobId, status: 'deleted', progress: null };
+    }
     const state = job ? await job.getState() : document.processing_status;
     const status = state === 'completed'
-      ? 'completed'
+      ? document.processing_status === DocumentProcessingStatus.Completed
+        ? 'completed'
+        : document.processing_status === DocumentProcessingStatus.Failed ? 'failed' : 'processing'
       : state === 'failed'
         ? 'failed'
         : state === 'active' || state === 'processing'
@@ -283,6 +295,14 @@ export class UploadService implements OnModuleDestroy {
       }));
       throw error;
     }
+  }
+
+  /** Removes queued and retained BullMQ jobs for a deleted account; active jobs stop on their own. */
+  async removeOwnerJobs(ownerId: string): Promise<void> {
+    const jobs = await this.queue.getJobs(['waiting', 'delayed', 'paused', 'prioritized', 'waiting-children', 'completed', 'failed']);
+    await Promise.all(jobs
+      .filter((job) => job?.data?.ownerId === ownerId)
+      .map((job) => this.logCleanupFailure('remove deleted account job', () => job.remove())));
   }
 
   private async cancelProjectDocumentJobs(projectId: string, documentId: string): Promise<void> {
