@@ -180,9 +180,12 @@ the `qdrant/upsert` dependency now measures the vector write without Gemini call
 
 Embedding batches retain `GEMINI_EMBEDDING_BATCH_SIZE` (for example, 100 inputs)
 and run with bounded parallelism while preserving vector/input order. Each batch
-retains its timeout and retry/backoff policy for transient errors. A failed batch stops new batches and
-drains in-flight requests before the job fails. Concurrent document jobs multiply
-embedding concurrency; lower it if provider quotas produce 429 responses.
+retains its timeout and retry/backoff policy for transient errors. A 429 with a
+provider-specified retry delay within `GEMINI_EMBEDDING_MAX_RETRY_AFTER_MS` is
+retried within the current job's attempt limit; a missing or longer delay is
+terminal. A failed batch stops new batches and drains in-flight requests before
+the job fails. Concurrent document jobs multiply embedding concurrency; lower it
+if provider quotas produce 429 responses.
 Successful in-flight batches are still saved if another batch fails. Snapshot
 writes are atomic and serialized per document so parallel completions do not
 overwrite newer results. Checkpoint I/O failures are surfaced rather than
@@ -217,7 +220,8 @@ Redis server time. With `input`, every embedding text (including query texts)
 and every retry is charged before its batch is sent, preventing a batch of 100
 texts from consuming only one unit of the local RPM budget. Other project
 traffic, daily quotas, token limits, and provider-specific accounting can still
-cause 429 responses, which stop indexing as described above.
+cause 429 responses. Short provider-directed delays are retried as described
+above; longer quota resets still stop indexing.
 Waits are logged as `dependency.rate_limit_wait`. If Redis is
 unreachable, each process falls back to an in-memory window and logs
 `dependency.rate_limiter_fallback` (processes may then jointly exceed the limit).

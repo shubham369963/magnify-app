@@ -242,8 +242,20 @@ export class GeminiEmbeddings extends Embeddings {
         const failure = new Error(
           `Gemini embedding request failed (${response.status})${responseDetail ? `: ${responseDetail}` : ''}`,
         );
-        // Any quota rejection stops indexing; retrying only spends more of the exhausted quota.
-        if (response.status === 429) throw new ProviderQuotaError('Gemini embedding', failure.message);
+        if (response.status === 429) {
+          const retryAfterMs = this.retryAfterMilliseconds(response.headers.get('retry-after'))
+            ?? this.providerRetryDelayMilliseconds(responseDetail);
+          if (
+            retryAfterMs !== undefined
+            && retryAfterMs > 0
+            && retryAfterMs <= this.settings.maxRetryAfterMs
+            && attempt < this.settings.maxAttempts
+          ) {
+            await this.waitBeforeRetry(operation, attempt, failure, String(retryAfterMs / 1000));
+            continue;
+          }
+          throw new ProviderQuotaError('Gemini embedding', failure.message);
+        }
         const retryable = response.status === 408 || response.status >= 500;
         if (!retryable || attempt === this.settings.maxAttempts) throw failure;
         await this.waitBeforeRetry(operation, attempt, failure, response.headers.get('retry-after'));
@@ -325,5 +337,14 @@ export class GeminiEmbeddings extends Embeddings {
       : Date.parse(value) - Date.now();
     if (!Number.isFinite(delayMs) || delayMs < 0) return undefined;
     return delayMs;
+  }
+
+  private providerRetryDelayMilliseconds(message: string): number | undefined {
+    const duration = message.match(/retry in\s+((?:\d+(?:\.\d+)?(?:h|m|s))+)/iu)?.[1];
+    if (!duration) return undefined;
+    const units = [...duration.matchAll(/(\d+(?:\.\d+)?)(h|m|s)/giu)];
+    if (!units.length || units.map(([part]) => part).join('') !== duration) return undefined;
+    const multipliers: Record<string, number> = { h: 3_600_000, m: 60_000, s: 1_000 };
+    return units.reduce((total, [, amount, unit]) => total + Number(amount) * multipliers[unit.toLowerCase()], 0);
   }
 }

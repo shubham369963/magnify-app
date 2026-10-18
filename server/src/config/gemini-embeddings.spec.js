@@ -124,12 +124,11 @@ test('Gemini embeddings retry transient errors before succeeding', async () => {
 
 test.each([
   ['a bare 429', ''],
-  ['a short provider retry delay', JSON.stringify({ error: { message: 'Quota exceeded. Please retry in 0.01s.' } })],
   ['a daily quota reset', JSON.stringify({ error: {
     message: 'Quota exceeded for metric: embed_content_free_tier_requests. Please retry in 10h3m41.16s.',
     status: 'RESOURCE_EXHAUSTED',
   } })],
-])('any Gemini 429 (%s) stops immediately without retries', async (_name, body) => {
+])('Gemini 429 without a short retry window (%s) stops without retries', async (_name, body) => {
   const previousTimeout = globalThis.setTimeout;
   const delays = [];
   let attempts = 0;
@@ -137,7 +136,7 @@ test.each([
   try {
     await withFetch(async () => {
       attempts += 1;
-      return new Response(body, { status: 429, headers: { 'Retry-After': '1' } });
+      return new Response(body, { status: 429 });
     }, async () => {
       await assert.rejects(new GeminiEmbeddings('test-key').embedDocuments(['source']), (error) =>
         error instanceof ProviderQuotaError && error instanceof UnrecoverableError
@@ -145,6 +144,32 @@ test.each([
     });
     assert.equal(attempts, 1);
     assert.deepEqual(delays, []);
+  } finally {
+    globalThis.setTimeout = previousTimeout;
+  }
+});
+
+test('Gemini 429 with a short provider retry delay retries the batch', async () => {
+  const previousTimeout = globalThis.setTimeout;
+  const delays = [];
+  let attempts = 0;
+  globalThis.setTimeout = (callback, delay) => { delays.push(delay); callback(); return 0; };
+  try {
+    await withFetch(async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        return new Response(JSON.stringify({ error: {
+          message: 'Quota exceeded. Please retry in 31.183698374s.',
+          status: 'RESOURCE_EXHAUSTED',
+        } }), { status: 429 });
+      }
+      return embeddingResponse(1);
+    }, async () => {
+      const [vector] = await new GeminiEmbeddings('test-key').embedDocuments(['source']);
+      assert.equal(vector.length, 768);
+    });
+    assert.equal(attempts, 2);
+    assert.deepEqual(delays, [31183.698374]);
   } finally {
     globalThis.setTimeout = previousTimeout;
   }
