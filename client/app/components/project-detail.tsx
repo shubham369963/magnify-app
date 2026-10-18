@@ -22,6 +22,7 @@ import {
   FormLabel,
   IconButton,
   List,
+  ListItem,
   ListItemButton,
   ListItemText,
   Paper,
@@ -75,6 +76,16 @@ interface Conversation {
   updated_at: string;
 }
 
+const CONVERSATION_PAGE_SIZE = 20;
+const CONVERSATION_QUERY_LIMIT = CONVERSATION_PAGE_SIZE + 1;
+const CONVERSATIONS_QUERY = `
+  query Conversations($projectId: ID!, $limit: Int, $offset: Int) {
+    conversations(projectId: $projectId, limit: $limit, offset: $offset) {
+      id title updated_at
+    }
+  }
+`;
+
 type DeleteTarget =
   | { kind: "document"; id: string; label: string }
   | { kind: "conversation"; id: string; label: string };
@@ -87,11 +98,34 @@ export default function ProjectDetail({ projectId }: { projectId: string }) {
   const [project, setProject] = useState<Project | null>(null);
   const [documents, setDocuments] = useState<ProjectDocument[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
-  const conversationId = conversations.some(
+  const [conversationOffset, setConversationOffset] = useState(0);
+  const [hasMoreConversations, setHasMoreConversations] = useState(false);
+  const [loadingMoreConversations, setLoadingMoreConversations] = useState(false);
+  const [routedConversation, setRoutedConversation] = useState<{
+    projectId: string;
+    conversation: Conversation;
+  } | null>(null);
+  const [resolvedRouteKey, setResolvedRouteKey] = useState<string | null>(null);
+  const routeConversationKey = routeConversationId
+    ? `${projectId}:${routeConversationId}`
+    : null;
+  const listedRouteConversation = conversations.find(
     (conversation) => conversation.id === routeConversationId,
-  )
-    ? routeConversationId
-    : (conversations[0]?.id ?? null);
+  );
+  const routeConversationIsListed = Boolean(listedRouteConversation);
+  const routedConversationMatches = routedConversation?.projectId === projectId
+    && routedConversation.conversation.id === routeConversationId;
+  const routeConversationUnresolved = Boolean(
+    routeConversationKey
+    && !routeConversationIsListed
+    && !routedConversationMatches
+    && resolvedRouteKey !== routeConversationKey,
+  );
+  const conversationId = routeConversationUnresolved
+    ? null
+    : routeConversationId && (routeConversationIsListed || routedConversationMatches)
+      ? routeConversationId
+      : (conversations[0]?.id ?? null);
   const [loadedProjectId, setLoadedProjectId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [strategySaving, setStrategySaving] = useState(false);
@@ -153,12 +187,8 @@ export default function ProjectDetail({ projectId }: { projectId: string }) {
       ),
       cachedBackendGraphqlRequest<{ conversations: Conversation[] }>(
         getToken,
-        `
-        query Conversations($projectId: ID!, $limit: Int, $offset: Int) {
-          conversations(projectId: $projectId, limit: $limit, offset: $offset) { id title updated_at }
-        }
-      `,
-        { projectId, limit: 100, offset: 0 },
+        CONVERSATIONS_QUERY,
+        { projectId, limit: CONVERSATION_QUERY_LIMIT, offset: 0 },
         userId ?? "signed-out",
         undefined,
         [`conversations:${projectId}`, `workspace:${projectId}`],
@@ -171,7 +201,9 @@ export default function ProjectDetail({ projectId }: { projectId: string }) {
         const conversationRows = conversationsResult.conversations;
         setProject(activeProject);
         setDocuments(documentRows.filter((item) => !deletedDocumentIdsRef.current.has(item.id)));
-        setConversations(conversationRows);
+        setConversations(conversationRows.slice(0, CONVERSATION_PAGE_SIZE));
+        setConversationOffset(Math.min(conversationRows.length, CONVERSATION_PAGE_SIZE));
+        setHasMoreConversations(conversationRows.length > CONVERSATION_PAGE_SIZE);
         setError(activeProject ? "" : "This project could not be found.");
       })
       .catch((cause: unknown) => {
@@ -179,6 +211,8 @@ export default function ProjectDetail({ projectId }: { projectId: string }) {
           setProject(null);
           setDocuments([]);
           setConversations([]);
+          setConversationOffset(0);
+          setHasMoreConversations(false);
           setError(
             cause instanceof Error
               ? cause.message
@@ -199,11 +233,59 @@ export default function ProjectDetail({ projectId }: { projectId: string }) {
   }, [projectId]);
 
   useEffect(() => {
+    if (loadedProjectId !== projectId || !routeConversationId) return;
+    const key = `${projectId}:${routeConversationId}`;
+    if (listedRouteConversation) return;
+    if (resolvedRouteKey === key) return;
+
+    let active = true;
+    void backendGraphqlRequest<{ conversation: Conversation }>(
+      getToken,
+      `
+      query Conversation($projectId: ID!, $conversationId: ID!) {
+        conversation(projectId: $projectId, conversationId: $conversationId) {
+          id title updated_at
+        }
+      }
+    `,
+      { projectId, conversationId: routeConversationId },
+    )
+      .then(({ conversation }) => {
+        if (!active) return;
+        setRoutedConversation({ projectId, conversation });
+        setResolvedRouteKey(key);
+      })
+      .catch((cause: unknown) => {
+        if (!active) return;
+        setRoutedConversation(null);
+        setResolvedRouteKey(key);
+        setError(
+          cause instanceof Error
+            ? cause.message
+            : "Could not load the requested conversation.",
+        );
+      });
+    return () => {
+      active = false;
+    };
+  }, [
+    getToken,
+    loadedProjectId,
+    projectId,
+    resolvedRouteKey,
+    routeConversationId,
+    listedRouteConversation,
+  ]);
+
+  useEffect(() => {
     if (loadedProjectId !== projectId || !project) return;
+    if (routeConversationUnresolved) return;
     const nextConversationId = conversations.some(
       (conversation) => conversation.id === routeConversationId,
     )
       ? routeConversationId
+      : routedConversationMatches
+        ? routeConversationId
       : (conversations[0]?.id ?? null);
     if (routeConversationId !== nextConversationId) {
       const params = new URLSearchParams(searchParams.toString());
@@ -218,6 +300,8 @@ export default function ProjectDetail({ projectId }: { projectId: string }) {
     project,
     projectId,
     routeConversationId,
+    routeConversationUnresolved,
+    routedConversationMatches,
     searchParams,
   ]);
 
@@ -227,6 +311,39 @@ export default function ProjectDetail({ projectId }: { projectId: string }) {
     params.set("conversationId", conversationId);
     const href = `/project?${params.toString()}`;
     window.history.pushState(null, "", href);
+  }
+
+  async function loadPreviousConversations() {
+    if (loadingMoreConversations || !hasMoreConversations) return;
+    setLoadingMoreConversations(true);
+    setError("");
+    try {
+      const { conversations: rows } = await cachedBackendGraphqlRequest<{
+        conversations: Conversation[];
+      }>(
+        getToken,
+        CONVERSATIONS_QUERY,
+        { projectId, limit: CONVERSATION_QUERY_LIMIT, offset: conversationOffset },
+        userId ?? "signed-out",
+        undefined,
+        [`conversations:${projectId}`, `workspace:${projectId}`],
+      );
+      const nextPage = rows.slice(0, CONVERSATION_PAGE_SIZE);
+      setConversations((current) => {
+        const existingIds = new Set(current.map((conversation) => conversation.id));
+        return [...current, ...nextPage.filter((conversation) => !existingIds.has(conversation.id))];
+      });
+      setConversationOffset((current) => current + nextPage.length);
+      setHasMoreConversations(rows.length > CONVERSATION_PAGE_SIZE);
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "Could not load previous conversations.",
+      );
+    } finally {
+      setLoadingMoreConversations(false);
+    }
   }
 
   useEffect(() => {
@@ -409,7 +526,12 @@ export default function ProjectDetail({ projectId }: { projectId: string }) {
       `,
         { projectId },
       );
-      setConversations((current) => [conversation, ...current]);
+      setConversations((current) =>
+        [conversation, ...current.filter((item) => item.id !== conversation.id)]
+          .slice(0, CONVERSATION_PAGE_SIZE),
+      );
+      setConversationOffset(CONVERSATION_PAGE_SIZE);
+      setHasMoreConversations(hasMoreConversations || conversations.length >= CONVERSATION_PAGE_SIZE);
       invalidateGraphqlCache([
         `conversations:${projectId}`,
         `workspace:${projectId}`,
@@ -509,6 +631,13 @@ export default function ProjectDetail({ projectId }: { projectId: string }) {
         );
         const remaining = conversations.filter((item) => item.id !== target.id);
         setConversations(remaining);
+        setConversationOffset((current) => Math.max(0, current - 1));
+        setRoutedConversation((current) =>
+          current?.conversation.id === target.id ? null : current,
+        );
+        if (routeConversationId === target.id) {
+          setResolvedRouteKey(`${projectId}:${target.id}`);
+        }
         invalidateGraphqlCache([
           `conversations:${projectId}`,
           `messages:${projectId}:${target.id}`,
@@ -744,6 +873,23 @@ export default function ProjectDetail({ projectId }: { projectId: string }) {
                       </Tooltip>
                     </Stack>
                   ))}
+                  {hasMoreConversations && (
+                    <ListItem disableGutters sx={{ px: 1, py: 0.75 }}>
+                      <Button
+                        fullWidth
+                        size="small"
+                        onClick={() => void loadPreviousConversations()}
+                        disabled={busy || loadingMoreConversations}
+                        startIcon={
+                          loadingMoreConversations
+                            ? <CircularProgress size={14} color="inherit" />
+                            : undefined
+                        }
+                      >
+                        {loadingMoreConversations ? "Loading conversations…" : "Load previous 20"}
+                      </Button>
+                    </ListItem>
+                  )}
                 </List>
               ) : (
                 <Box sx={{ p: 2 }}>

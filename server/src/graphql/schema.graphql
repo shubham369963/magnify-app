@@ -97,7 +97,7 @@ type Query {
   documents(projectId: ID!, limit: Int, offset: Int): [ProjectDocument!]!
   conversations(projectId: ID!, limit: Int, offset: Int): [Conversation!]!
   conversation(projectId: ID!, conversationId: ID!): Conversation!
-  messages(projectId: ID!, conversationId: ID!): [ChatMessage!]!
+  messages(projectId: ID!, conversationId: ID!, limit: Int, offset: Int): [ChatMessage!]!
   uploadStatus(jobId: ID!): UploadStatus!
   projectIndexTreeStatus(projectId: ID!): ProjectIndexTreeStatus
 }

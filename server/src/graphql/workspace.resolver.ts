@@ -67,8 +67,10 @@ export class WorkspaceResolver {
     @Context() context: GraphQLContext,
     @Args('projectId', { type: () => ID }) projectId: string,
     @Args('conversationId', { type: () => ID }) conversationId: string,
+    @Args('limit', { type: () => Int, nullable: true }) limit?: number,
+    @Args('offset', { type: () => Int, nullable: true }) offset?: number,
   ) {
-    return this.conversationsService.listMessages(this.ownerId(context), projectId, conversationId);
+    return this.conversationsService.listMessages(this.ownerId(context), projectId, conversationId, limit, offset);
   }
 
   @Query('uploadStatus')

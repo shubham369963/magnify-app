@@ -150,18 +150,28 @@ export class ConversationsService {
     ownerId: string,
     projectId: string,
     conversationId: string,
+    limit?: number,
+    offset = 0,
   ): Promise<ChatMessage[]> {
     await this.get(ownerId, projectId, conversationId);
+    const paginated = limit !== undefined;
     const messages = await this.supabase.select<ChatMessage>(
       "messages",
       new URLSearchParams({
         conversation_id: `eq.${conversationId}`,
         select: "*",
-        order: "sequence_number.asc",
+        order: paginated ? "sequence_number.desc" : "sequence_number.asc",
+        ...(paginated
+          ? {
+              limit: String(pageSize(limit)),
+              offset: String(Number.isFinite(offset) ? Math.max(0, Math.floor(offset)) : 0),
+            }
+          : {}),
       }),
     );
+    const orderedMessages = paginated ? messages.reverse() : messages;
     return Promise.all(
-      messages.map(async (message) => {
+      orderedMessages.map(async (message) => {
         const sources = Array.isArray(message.metadata.sources)
           ? message.metadata.sources
           : [];

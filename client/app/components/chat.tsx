@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import SendRounded from "@mui/icons-material/SendRounded";
 import SmartToyOutlined from "@mui/icons-material/SmartToyOutlined";
 import PersonOutlineRounded from "@mui/icons-material/PersonOutlineRounded";
@@ -17,6 +17,7 @@ import {
   Alert,
   Avatar,
   Box,
+  Button,
   CircularProgress,
   Dialog,
   DialogContent,
@@ -56,6 +57,7 @@ interface Message {
 }
 
 const EMPTY_MESSAGES: Message[] = [];
+const MESSAGE_PAGE_SIZE = 20;
 const MAX_STORED_REPLY_TIMINGS = 500;
 
 interface StoredReplyTiming {
@@ -215,14 +217,22 @@ function ChatComposer({ pending, indexing, loading, sendDisabledReason, error, o
 export default function Chat({ projectId, userId, conversationId, getToken, indexing, sendDisabledReason, onMessagesChanged }: ChatProps) {
   const pageRevision = usePageRevalidation();
   const activeKey = `${projectId}:${conversationId}`;
-  const messageVariables = { projectId, conversationId };
+  const messageVariables = {
+    projectId,
+    conversationId,
+    limit: MESSAGE_PAGE_SIZE,
+    offset: 0,
+  };
   const cachedHistory = getCachedGraphqlResult<{ messages: StoredMessage[] }>(userId, MESSAGES_QUERY, messageVariables);
   const [history, setHistory] = useState<{
     key: string;
     messages: Message[];
     loading: boolean;
     error: string;
-  }>({ key: "", messages: [], loading: true, error: "" });
+    offset: number;
+    hasPrevious: boolean;
+    loadingPrevious: boolean;
+  }>({ key: "", messages: [], loading: true, error: "", offset: 0, hasPrevious: false, loadingPrevious: false });
   const [pendingKey, setPendingKey] = useState<string | null>(null);
   const [copyFeedback, setCopyFeedback] = useState<{ id: string; copied: boolean } | null>(null);
   const [activePreview, setActivePreview] = useState<{ url: string; title: string } | null>(null);
@@ -231,13 +241,25 @@ export default function Chat({ projectId, userId, conversationId, getToken, inde
   const activeHistory = history.key === activeKey
     ? history
     : cachedHistory
-      ? { key: activeKey, messages: toMessages(cachedHistory.messages), loading: false, error: "" }
+      ? {
+          key: activeKey,
+          messages: toMessages(cachedHistory.messages),
+          loading: false,
+          error: "",
+          offset: cachedHistory.messages.length,
+          hasPrevious: cachedHistory.messages.length === MESSAGE_PAGE_SIZE,
+          loadingPrevious: false,
+        }
       : null;
   const messages = activeHistory?.messages ?? EMPTY_MESSAGES;
   const loading = !activeHistory || activeHistory.loading;
   const error = activeHistory?.error ?? "";
+  const hasPreviousMessages = activeHistory?.hasPrevious ?? false;
+  const loadingPreviousMessages = activeHistory?.loadingPrevious ?? false;
   const pending = pendingKey === activeKey;
   const endRef = useRef<HTMLDivElement>(null);
+  const messageListRef = useRef<HTMLDivElement>(null);
+  const preservedScrollDistanceRef = useRef<number | null>(null);
 
   async function copyAnswer(entry: Message) {
     try {
@@ -288,7 +310,12 @@ export default function Chat({ projectId, userId, conversationId, getToken, inde
     cachedBackendGraphqlRequest<{ messages: StoredMessage[] }>(
       getToken,
       MESSAGES_QUERY,
-      { projectId, conversationId },
+      {
+        projectId,
+        conversationId,
+        limit: MESSAGE_PAGE_SIZE,
+        offset: 0,
+      },
       userId,
       undefined,
       [`project:${projectId}`, `workspace:${projectId}`, `messages:${projectId}:${conversationId}`],
@@ -300,6 +327,9 @@ export default function Chat({ projectId, userId, conversationId, getToken, inde
           messages: restoredMessages,
           loading: false,
           error: "",
+          offset: rows.length,
+          hasPrevious: rows.length === MESSAGE_PAGE_SIZE,
+          loadingPrevious: false,
         });
       }
     }).catch((cause: unknown) => {
@@ -308,14 +338,71 @@ export default function Chat({ projectId, userId, conversationId, getToken, inde
         messages: [],
         loading: false,
         error: cause instanceof Error ? cause.message : "Could not load conversation history.",
+        offset: 0,
+        hasPrevious: false,
+        loadingPrevious: false,
       });
     });
     return () => { current = false; };
   }, [conversationId, getToken, pageRevision, projectId, userId]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    const preservedDistance = preservedScrollDistanceRef.current;
+    const container = messageListRef.current;
+    if (preservedDistance !== null && container) {
+      container.scrollTop = container.scrollHeight - preservedDistance;
+      preservedScrollDistanceRef.current = null;
+      return;
+    }
     endRef.current?.scrollIntoView({ block: "nearest" });
   }, [messages, pending]);
+
+  async function loadPreviousMessages() {
+    if (!activeHistory?.hasPrevious || activeHistory.loadingPrevious) return;
+    const offset = activeHistory.offset;
+    setHistory((current) => current.key === activeKey
+      ? { ...current, error: "", loadingPrevious: true }
+      : current);
+    try {
+      const { messages: rows } = await cachedBackendGraphqlRequest<{
+        messages: StoredMessage[];
+      }>(
+        getToken,
+        MESSAGES_QUERY,
+        { ...messageVariables, offset },
+        userId,
+        undefined,
+        [`project:${projectId}`, `workspace:${projectId}`, `messages:${projectId}:${conversationId}`],
+      );
+      const previousMessages = await restoreReplyTimings(rows, projectId, conversationId);
+      if (rows.length) {
+        const container = messageListRef.current;
+        if (container) {
+          preservedScrollDistanceRef.current = container.scrollHeight - container.scrollTop;
+        }
+      }
+      setHistory((current) => {
+        if (current.key !== activeKey) return current;
+        const existingIds = new Set(current.messages.map((message) => message.id));
+        const olderMessages = previousMessages.filter((message) => !existingIds.has(message.id));
+        return {
+          ...current,
+          messages: [...olderMessages, ...current.messages],
+          offset: offset + rows.length,
+          hasPrevious: rows.length === MESSAGE_PAGE_SIZE,
+          loadingPrevious: false,
+        };
+      });
+    } catch (cause) {
+      setHistory((current) => current.key === activeKey
+        ? {
+            ...current,
+            loadingPrevious: false,
+            error: cause instanceof Error ? cause.message : "Could not load previous messages.",
+          }
+        : current);
+    }
+  }
 
   async function send(query: string): Promise<boolean> {
     if (!query || pending || indexing || sendDisabledReason) return false;
@@ -393,7 +480,7 @@ export default function Chat({ projectId, userId, conversationId, getToken, inde
         const { messages: rows } = await cachedBackendGraphqlRequest<{ messages: StoredMessage[] }>(
           getToken,
           MESSAGES_QUERY,
-          { projectId, conversationId },
+          messageVariables,
           userId,
           undefined,
           [`project:${projectId}`, `workspace:${projectId}`, `messages:${projectId}:${conversationId}`],
@@ -411,6 +498,9 @@ export default function Chat({ projectId, userId, conversationId, getToken, inde
             messages: restoredMessages,
             loading: false,
             error: "",
+            offset: rows.length,
+            hasPrevious: rows.length === MESSAGE_PAGE_SIZE,
+            loadingPrevious: false,
           });
           invalidateGraphqlCache([`workspace:${projectId}`]);
           onMessagesChanged();
@@ -445,7 +535,7 @@ export default function Chat({ projectId, userId, conversationId, getToken, inde
           </IconButton>
         </Tooltip>
       </Box>
-      <Box role="log" aria-live="polite" aria-label="Chat messages" sx={{ flex: 1, minHeight: 0, overflowY: "auto", px: { xs: 1.5, sm: 2.25 }, py: 2, display: "flex", flexDirection: "column", gap: 1.5 }}>
+      <Box ref={messageListRef} role="log" aria-live="polite" aria-label="Chat messages" sx={{ flex: 1, minHeight: 0, overflowY: "auto", px: { xs: 1.5, sm: 2.25 }, py: 2, display: "flex", flexDirection: "column", gap: 1.5 }}>
         {loading ? (
           <Stack role="status" spacing={1} sx={{ flex: 1, alignItems: "center", justifyContent: "center", color: "text.secondary" }}><CircularProgress size={24} /><Typography variant="body2">Loading conversation</Typography></Stack>
         ) : messages.length === 0 ? (
@@ -454,7 +544,24 @@ export default function Chat({ projectId, userId, conversationId, getToken, inde
             <Typography variant="h3">Ask your first question</Typography>
             <Typography variant="body2">Upload PDFs to this project, then ask for summaries or evidence.</Typography>
           </Stack>
-        ) : messages.map((entry) => (
+        ) : (
+          <>
+            {hasPreviousMessages && (
+              <Button
+                size="small"
+                onClick={() => void loadPreviousMessages()}
+                disabled={loadingPreviousMessages}
+                startIcon={
+                  loadingPreviousMessages
+                    ? <CircularProgress size={14} color="inherit" />
+                    : undefined
+                }
+                sx={{ alignSelf: "center" }}
+              >
+                {loadingPreviousMessages ? "Loading messages…" : "Load previous 20 messages"}
+              </Button>
+            )}
+            {messages.map((entry) => (
           <Stack key={entry.id} direction="row" spacing={0.75} sx={{ alignSelf: entry.role === "user" ? "flex-end" : "flex-start", maxWidth: "min(96%, 920px)", flexDirection: entry.role === "user" ? "row-reverse" : "row", alignItems: "flex-start" }}>
             <Avatar sx={{ width: 24, height: 24, bgcolor: entry.role === "user" ? "secondary.main" : "primary.main" }}>
               {entry.role === "user" ? <PersonOutlineRounded sx={{ fontSize: 18 }} /> : <SmartToyOutlined sx={{ fontSize: 18 }} />}
@@ -552,7 +659,9 @@ export default function Chat({ projectId, userId, conversationId, getToken, inde
             )}
             </Paper>
           </Stack>
-        ))}
+            ))}
+          </>
+        )}
         {pending && <Stack direction="row" spacing={1} role="status" sx={{ alignItems: "center", color: "text.secondary" }}><CircularProgress size={16} /><Typography variant="caption">Thinking...</Typography></Stack>}
         <div ref={endRef} />
       </Box>

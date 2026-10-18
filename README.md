@@ -71,7 +71,7 @@ Worker concurrency and image/embedding limits are per process, while the Gemini 
 4. Choose a project’s retrieval strategy:
    - **Vector RAG** searches document passages by embedding similarity.
    - **Vectorless Index-Tree RAG** builds a project-wide passage hierarchy and uses an LLM to select relevant evidence without vector search.
-5. Create or select a conversation and ask a question about the project’s PDFs. Answers include cited source passages and page references; open a source to inspect its PDF page.
+5. Create or select a conversation and ask a question about the project’s PDFs. Answers include cited source passages and page references; open a source to inspect its PDF page. The chat initially loads the latest 20 messages; choose **Load previous 20 messages** to browse older history.
 6. Continue the conversation, create additional conversations, or manage the project’s PDFs and details from the project workspace.
 
 ## Run Locally
