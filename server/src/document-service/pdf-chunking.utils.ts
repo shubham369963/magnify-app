@@ -5,7 +5,9 @@ export function normalizePageText(text: string): string | null {
   return pageText || null;
 }
 
-export function splitPageText(text: string, maximumCharacters = 2800): string[] {
+export const DEFAULT_PAGE_TEXT_CHUNK_SIZE = 5600;
+
+export function splitPageText(text: string, maximumCharacters = DEFAULT_PAGE_TEXT_CHUNK_SIZE): string[] {
   const pageText = normalizePageText(text);
   if (!pageText) return [];
 

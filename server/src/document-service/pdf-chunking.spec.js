@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from '@jest/globals';
-import { imagePagesFromListing, normalizePageText, selectImagePages, splitPageText, stableVectorPointId } from '../../dist/document-service/pdf-chunking.utils.js';
+import { DEFAULT_PAGE_TEXT_CHUNK_SIZE, imagePagesFromListing, normalizePageText, selectImagePages, splitPageText, stableVectorPointId } from '../../dist/document-service/pdf-chunking.utils.js';
 
 test("PDF page text stays together as one normalized page chunk", () => {
   assert.deepEqual(
@@ -14,7 +14,8 @@ test('long PDF pages split into bounded vector chunks without losing headings or
   const chunks = splitPageText(text);
 
   assert.ok(chunks.length > 1);
-  assert.ok(chunks.every((chunk) => chunk.length <= 2800));
+  assert.ok(chunks.length < splitPageText(text, 2800).length);
+  assert.ok(chunks.every((chunk) => chunk.length <= DEFAULT_PAGE_TEXT_CHUNK_SIZE));
   assert.equal(chunks.join(' '), text);
   assert.match(chunks[0], /^INTRODUCTION/u);
 });

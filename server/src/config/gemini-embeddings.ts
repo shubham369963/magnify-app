@@ -45,7 +45,7 @@ function readGeminiEmbeddingSettings(): GeminiEmbeddingSettings {
   const rateLimitPerMinute = !rawRateLimit || rawRateLimit === '0'
     ? 0
     : positiveIntegerFromEnvironment('GEMINI_EMBEDDING_RATE_LIMIT_PER_MINUTE');
-  const rateLimitUnit = (process.env.GEMINI_EMBEDDING_RATE_LIMIT_UNIT?.trim() || 'request') as EmbeddingRateLimitUnit;
+  const rateLimitUnit = (process.env.GEMINI_EMBEDDING_RATE_LIMIT_UNIT?.trim() || 'input') as EmbeddingRateLimitUnit;
   if (rateLimitUnit !== 'input' && rateLimitUnit !== 'request') {
     throw new ServiceUnavailableException('GEMINI_EMBEDDING_RATE_LIMIT_UNIT must be "input" or "request".');
   }

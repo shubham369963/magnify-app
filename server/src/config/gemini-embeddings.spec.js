@@ -591,7 +591,7 @@ test('rate limiter falls back to the in-process window when Redis fails', async 
   }
 });
 
-test('Gemini embeddings charge one unit per request by default', async () => {
+test('Gemini embeddings charge one unit per input by default', async () => {
   process.env.GEMINI_EMBEDDING_RATE_LIMIT_PER_MINUTE = '100';
   delete process.env.GEMINI_EMBEDDING_RATE_LIMIT_UNIT;
   process.env.GEMINI_EMBEDDING_BATCH_CONCURRENCY = '1';
@@ -607,7 +607,7 @@ test('Gemini embeddings charge one unit per request by default', async () => {
     assert.equal(vectors.length, 250);
   });
   assert.deepEqual(batchSizes, [100, 100, 50]);
-  assert.deepEqual(limiter.costs, [1, 1, 1]);
+  assert.deepEqual(limiter.costs, [100, 100, 50]);
 });
 
 test('invalid rate limit unit is rejected', () => {

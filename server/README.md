@@ -197,9 +197,10 @@ For persistent Gemini quota failures:
 2. For sustained ingestion, [enable billing on that project](https://ai.google.dev/gemini-api/docs/billing)
    and verify the paid tier and its active limits. Request a quota increase if
    necessary. Another key in the same project does not provide another quota.
-3. Set `GEMINI_EMBEDDING_RATE_LIMIT_PER_MINUTE` to the project's RPM (for example
-   `100` embedding requests per minute). Concurrency settings alone only limit bursts; the rate limiter is the
-   global guard.
+3. Set `GEMINI_EMBEDDING_RATE_LIMIT_PER_MINUTE` to the project's effective embedding
+   RPM (for example `100` inputs per minute). `input` accounting is the safe
+   default because providers may count each text in a batch against RPM. Concurrency
+   settings alone only limit bursts; the shared rate limiter is the global guard.
 4. A depleted daily quota or billing issue requires a quota reset, billing
    repair, or an approved increase before uploading again.
 
@@ -208,14 +209,15 @@ For persistent Gemini quota failures:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `GEMINI_EMBEDDING_RATE_LIMIT_PER_MINUTE` | `0` (off) | Budget per rolling 60 seconds. Templates set `100`. |
-| `GEMINI_EMBEDDING_RATE_LIMIT_UNIT` | `request` | `request` charges one unit per HTTP call (a `batchEmbedContents` call of up to 100 texts costs 1). Switch to `input` only if AI Studio shows usage growing by the number of texts per batch; it then charges one unit per text and caps batch size at the limit. |
+| `GEMINI_EMBEDDING_RATE_LIMIT_UNIT` | `input` | `input` charges one unit per text in a batch and caps batch size at the per-minute limit. Use `request` only when the provider's quota counts each `batchEmbedContents` HTTP call as one request. |
 
 The API (query embeddings) and the worker (document embeddings) share one
 cost-weighted sliding window in Redis/Valkey, keyed by embedding model and using
-Redis server time. Every attempt, including retries, is charged before it is
-sent to enforce the configured local RPM budget. Other project traffic, daily
-quotas, token limits, or per-input accounting can still cause 429 responses,
-which stop indexing as described above.
+Redis server time. With `input`, every embedding text (including query texts)
+and every retry is charged before its batch is sent, preventing a batch of 100
+texts from consuming only one unit of the local RPM budget. Other project
+traffic, daily quotas, token limits, and provider-specific accounting can still
+cause 429 responses, which stop indexing as described above.
 Waits are logged as `dependency.rate_limit_wait`. If Redis is
 unreachable, each process falls back to an in-memory window and logs
 `dependency.rate_limiter_fallback` (processes may then jointly exceed the limit).
@@ -223,10 +225,9 @@ unreachable, each process falls back to an in-memory window and logs
 With `input`, the effective batch size is capped at the per-minute limit, so with
 `100`/minute, a document with 450 chunks needs about 4.5 minutes of embedding no
 matter the batch size or concurrency. While a large upload holds the window,
-chat queries can also wait for budget. The default is `request`, matching a
-requests-per-minute quota. If AI Studio shows usage growing by the number of
-texts in a batch rather than by one, explicitly switch to `input`. Neither mode
-increases Google's daily request quota.
+chat queries can also wait for budget. Use `request` only after confirming that
+the provider counts one batch call as one quota request. Neither mode increases
+Google's daily request quota.
 
 Reducing output dimensions (for example, from 768) reduces vector size, not the
 number of embedding inputs or the request quota. Selecting Vectorless retrieval
@@ -309,9 +310,11 @@ The worker stores owner, project, and document metadata with each Qdrant chunk;
 search applies owner and project filters inside Qdrant. Before storing chunks,
 the worker creates keyword payload indexes on `metadata.owner_clerk_id`,
 `metadata.project_id`, and `metadata.document_id` for filtered search.
-Extracted text is split into lossless chunks of at most 2,800 characters, each
-retaining its source page and chunk number. Pages with qualifying raster images also
-receive separate image-caption chunks.
+Vector-index text is split into lossless, page-aware chunks of at most 5,600
+characters, reducing embedding inputs for long pages while retaining source
+page and chunk metadata. Each non-empty page still produces at least one chunk.
+Pages with qualifying raster images also receive separate image-caption chunks.
+Larger chunks reduce retrieval granularity, so matches may include broader context.
 Pages passing the shared embedded-image filter are rendered and captioned with the
 `OLLAMA_CLOUD_VISION_MODEL` (default `gemma4:31b`); those captions are embedded
 with the existing Gemini text embedding model and stored with the page's owner,

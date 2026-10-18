@@ -107,6 +107,6 @@ envVarGroups:
       - key: GEMINI_EMBEDDING_RATE_LIMIT_PER_MINUTE
         value: "100"
       - key: GEMINI_EMBEDDING_RATE_LIMIT_UNIT
-        value: request
+        value: input
       - key: SUPABASE_STORAGE_BUCKET
         value: documents
