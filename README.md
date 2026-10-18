@@ -1,112 +1,242 @@
 # Magnify
 
-Magnify is a PDF research workspace. Organize documents into projects, ask
-questions across each project's PDFs, and review the source passages behind the
-answers.
+Magnify is a project-based PDF research workspace. Organize PDFs and
+conversations by project, ask questions grounded in those documents, and inspect
+the source passages behind each answer.
 
 ## Architecture
 
+The browser talks to the Next.js app. The app forwards authenticated GraphQL
+and REST calls to the NestJS API through a same-origin rewrite. PDF indexing
+runs asynchronously in a separate worker process.
+
 ```mermaid
 flowchart LR
-    Person[Researcher] --> Web[Next.js web app]
-    Web -->|Clerk session token| API[NestJS API]
-    Web -->|/api/backend rewrite| API
-    API --> Clerk[Clerk authentication]
-    API --> DB[(Supabase database)]
-    API --> Files[(Private Supabase Storage)]
-    API --> Queue[(Redis / BullMQ queue)]
-    Queue --> Worker[PDF processing worker]
-    Worker --> Files
-    Worker -->|text and image captions| Models[Gemini embeddings and Ollama Cloud]
-    Worker --> Vectors[(Qdrant vector collection)]
-    Worker --> DB
-    API -->|Vector RAG| Vectors
-    API -->|Index-Tree RAG| DB
-    API --> Models
-    API -->|Answers and PDF sources| Web
+  subgraph Client["Frontend · client/"]
+    User[Researcher]
+    UI["Next.js App Router<br/>projects · documents · chat"]
+    ClerkUI["Clerk React provider"]
+    GQL["GraphQL client<br/>workspace queries and mutations"]
+    REST["REST client<br/>multipart PDF upload"]
+    Rewrite["Next.js rewrite<br/>/api/backend/*"]
+    User --> UI
+    UI --> GQL
+    UI --> REST
+    ClerkUI -->|session token| GQL
+    ClerkUI -->|session token| REST
+    GQL --> Rewrite
+    REST --> Rewrite
+  end
+
+  subgraph Server["Backend · server/"]
+    API["NestJS API"]
+    Apollo["Apollo GraphQL<br/>/graphql"]
+    RESTAPI["REST endpoints<br/>workspace · multipart upload · operations"]
+    Guard["ClerkAuthGuard<br/>verify token · resolve owner"]
+    Services["Project · document · conversation services"]
+    Upload["UploadService"]
+    Chat["ChatService"]
+    API --> Apollo
+    API --> RESTAPI
+    Apollo --> Guard
+    RESTAPI --> Guard
+    Guard --> Services
+    Services --> Upload
+    Services --> Chat
+  end
+
+  Rewrite --> API
+  ClerkUI <-->|sign-in and session| Clerk[Clerk]
+  Guard -->|JWKS public keys| Clerk
+  Clerk -->|signed user-deleted webhook| API
+
+  subgraph Async["Background processing"]
+    Queue["BullMQ queue"]
+    Worker["NestJS worker<br/>PdfService + Poppler"]
+    Upload -->|one document-index job| Queue
+    Queue --> Worker
+  end
+
+  subgraph Data["Data services"]
+    Postgres[(Supabase Postgres<br/>projects · documents · conversations<br/>messages · Index Tree)]
+    Storage[(Private Supabase Storage<br/>PDF originals)]
+    Redis[(Valkey / Redis)]
+    Qdrant[(Qdrant<br/>passage and image-caption vectors)]
+  end
+  Services --> Postgres
+  Upload --> Postgres
+  Upload --> Storage
+  Queue --> Redis
+  Worker --> Storage
+  Worker --> Postgres
+  Worker --> Qdrant
+  Chat --> Postgres
+  Chat --> Qdrant
+
+  Gemini["Google Gemini<br/>text embeddings"]
+  Ollama["Ollama Cloud<br/>image captions · evidence selection · answers"]
+  Worker -->|embed passages| Gemini
+  Chat -->|embed vector query| Gemini
+  Worker -->|caption eligible PDF images| Ollama
+  Chat -->|select evidence and generate answer| Ollama
+
+  subgraph Monitoring["Optional monitoring"]
+    Prometheus[Prometheus]
+    Grafana[Grafana]
+  end
+  API -->|/metrics| Prometheus
+  Worker -->|worker metrics :9464| Prometheus
+  Prometheus --> Grafana
 ```
 
-### Components and ownership
+### Frontend and API boundary
 
-- **Web app:** Next.js and React provide project, document, conversation, and chat views. Browser API calls use the server-side `/api/backend/*` rewrite rather than connecting directly to the API host. Upload state is polled from the API, restored across reloads, and remains locked while an upload is active.
-- **Authentication:** Clerk manages sign-in. The API verifies session tokens and scopes project data, status checks, and retrieval to the signed-in user. Clerk account deletion also removes the user's application data and associated indexed assets.
-- **API:** NestJS exposes REST and GraphQL operations for projects, PDFs, conversations, messages, and processing status. It validates uploads, stores the PDF, creates the document record, and enqueues the processing job.
-- **Queue and worker:** BullMQ stores jobs in Redis/Valkey. A separate NestJS worker downloads and indexes PDFs outside the request lifecycle. One normal upload creates one `document-index` job that prepares both retrieval indexes; the selected project strategy does not change ingestion.
-- **Relational data and files:** Supabase Postgres stores projects, document processing state, conversations/messages, and the project Index Tree. PDFs are stored in a private Supabase Storage bucket.
-- **Vector data:** Qdrant stores document text and image-caption embeddings, with document/project/owner metadata used to scope retrieval and deletion.
-- **Models:** Google Gemini generates embeddings for document passages and vector-search queries. Ollama Cloud provides image captions and chat-time answer/relevance operations. Index Tree structure is generated from extracted page text and captions using application-side tree-building logic.
-- **Observability:** The API and worker expose Prometheus metrics for requests, queues, dependencies, and ingestion stages. Local Docker Compose provisions Prometheus and Grafana; these are not part of the Render Blueprint by default.
+- `client/` is a Next.js App Router application using React, MUI, and Clerk.
+  Clerk protects the workspace UI and supplies session tokens. GraphQL is the
+  main UI API for projects, documents, conversations, messages, chat, and
+  indexing status; PDF bytes are uploaded as multipart REST requests.
+- Browser requests target `/api/backend/*`, which `client/next.config.ts`
+  rewrites to `NEST_API_URL` (or `NEST_API_HOSTPORT`; defaults to
+  `http://localhost:8000`). The browser does not call the API host directly.
+  GraphQL responses are cached in memory per Clerk user and invalidated after
+  mutations.
+- `server/` is a NestJS application with an Apollo schema-first GraphQL API,
+  REST controllers, domain services, and a separate BullMQ worker entry point.
+  The API verifies Clerk JWTs against Clerk JWKS and scopes owned data by the
+  token subject. Clerk account deletion is handled by a separately signed
+  webhook and removes the user's application data and indexed assets.
+- Supabase Postgres stores project, document, conversation, message, and
+  project Index Tree records. Original PDFs live in a private Supabase Storage
+  bucket. The backend accesses both with its server-side service-role
+  credential; that credential must never be exposed to the browser.
 
-### PDF upload and dual-indexing lifecycle
+### PDF ingestion and retrieval
 
-1. The browser uploads the PDF through the API. The API checks that it is a valid PDF within the configured size limit, writes it to private storage, inserts a pending document row, opens a new project-index generation, and enqueues a `document-index` BullMQ job. The job ID is the document ID.
-2. The worker checks that the document still exists, downloads it once into temporary storage, and extracts its pages and text once. Text is normalized and split into page-aware Vector passages (up to 5,600 characters by default); each passage carries document, project, owner, source, page, and chunk metadata.
-3. The worker inspects the PDF's image list. Pages with no qualifying images are not rendered or sent for captioning. Small images (such as logos), images displayed below the configured minimum size, and repeated image objects (such as recurring company marks) are skipped. Remaining pages are rendered and captioned concurrently within configured worker, render, and image limits.
-4. The extracted passages and image captions are shared inputs to both indexes. Captions are added as image-caption passages for Vector RAG; page text and captions are organized into a document node for the project-wide Index Tree. Prepared passages and the tree node are checkpointed before embedding so a retried job can reuse completed extraction and captioning work.
-5. Gemini embeds passages in bounded batches. A shared Redis/Valkey rate limiter coordinates embedding requests between API and worker processes. Successful batches are checkpointed as they complete. Qdrant stores vectors under stable point IDs, making document-scoped replacement and cleanup possible.
-6. After the vector write succeeds, a Postgres function merges the document node into the project Index Tree under a row lock, marks the document completed, and recalculates project index status. Concurrent uploads therefore add their own nodes rather than overwriting one another. The document shows as completed only after both the vector index and tree index are ready.
-7. The worker removes successful-job checkpoints and temporary files. If the user deletes a PDF while it is being processed, existence checks stop further work and the deleted document is not recreated.
+1. The API verifies the PDF signature and configured size limit, stores the
+   original PDF, creates a pending document record, requests a project-tree
+   generation, and enqueues one `document-index` job. Its job ID is the
+   document ID.
+2. The worker downloads and extracts the PDF once. It creates page-aware text
+   passages and uses Poppler to discover/render only eligible image pages;
+   Ollama Cloud captions those images. The shared extracted text and captions
+   feed both retrieval indexes.
+3. The worker checkpoints prepared passages, the document's tree node, and
+   successful embedding batches so eligible job retries can reuse completed
+   work. Gemini embeds the passages in bounded batches, and Qdrant stores them
+   with document, project, and owner metadata.
+4. After the vector write succeeds, a Postgres function merges the document
+   node into the project Index Tree under a row lock and marks the document
+   complete. A document is ready only when both indexes are ready.
+5. A separate `project-index-tree` job is used for full tree rebuilds and tree
+   maintenance, such as explicit reindexing or document deletion. It is not a
+   second job enqueued for every normal upload.
 
-The project strategy controls **chat retrieval only**:
+The project's RAG strategy affects **chat retrieval**, not ingestion:
 
-- **Vector RAG** embeds the question, searches Qdrant for similar passages, selects relevant evidence, and sends that evidence to the chat model to form a grounded answer.
-- **Vectorless Index-Tree RAG** loads the project tree from Supabase and uses model-assisted selection to navigate its sections and passages, then generates an answer grounded in the selected evidence. It does not query Qdrant for passage retrieval.
+- **Vector RAG** embeds the question with Gemini, searches Qdrant with
+  owner/project filters, and uses Ollama Cloud to select evidence and generate
+  a grounded answer.
+- **Vectorless Index-Tree RAG** loads the project's stored tree from Postgres
+  and uses Ollama Cloud to navigate sections/passages and answer from selected
+  evidence. It does not query Qdrant for passage retrieval.
 
-Both strategies use the same completed ingestion products. Changing the strategy therefore does not require uploading or indexing the PDFs again. Explicit project-tree rebuilds and tree maintenance after a document deletion are separate jobs; they do not replace the normal combined upload job.
+When evidence is available, both paths use recent conversation history, persist
+the exchange, and return source excerpts and page metadata. Image-caption
+sources can include a short-lived signed PDF preview URL. Since every upload
+builds both indexes, Vectorless mode still requires the configured embedding
+provider during ingestion.
 
-### Failures, cleanup, and recovery
+### Runtime topology
 
-- Transient embedding timeouts, HTTP `408`, and server errors (`5xx`) can be retried with the configured retry policy. Checkpointed embedding batches and prepared document data are reused on job retries.
-- A provider quota/rate-limit failure (including a Gemini embedding `429` or a vision-provider quota rejection) is terminal: the worker stops starting additional batches/pages, records the failure for status polling, and removes the failed upload, its partial Qdrant vectors, stored PDF, and checkpoint. The project tree/status is recalculated from remaining documents, and the UI displays the actionable failure reason.
-- Other processing failures mark the document failed and follow the queue's retry policy. A user-initiated document deletion removes its vectors, storage object, document row, and checkpoint, then refreshes the project tree.
-- Account deletion removes the user's project/document/conversation records, stored objects (including orphaned uploads), Qdrant vectors, checkpoints, and queued/retained jobs.
+The source separates the frontend, API, and worker, but deployment bundles can
+run them differently:
 
-Worker concurrency and image/embedding limits are per process, while the Gemini rate limiter is shared through Redis/Valkey. Increasing the number of worker processes multiplies local concurrency limits, so scale with memory and provider quotas in mind. Checkpoint durability depends on persistent storage shared by API and worker; local Compose uses a shared volume, while the Render Blueprint currently has no persistent checkpoint disk. See [`server/README.md`](server/README.md) for settings, quota behavior, migration requirements, local observability, and operational guidance.
+- **Local development:** run the frontend separately. `server/` starts the API
+  and worker as separate processes; its infrastructure Compose file supplies
+  Valkey and Qdrant. Supabase, Clerk, Gemini, and Ollama Cloud remain configured
+  services.
+- **Backend Docker Compose:** runs API, worker, Valkey, Qdrant, Prometheus, and
+  Grafana. It does not run the Next.js frontend.
+- **Render Blueprint:** builds one public web service containing the Next.js
+  app, API, worker, local Redis, and optional Prometheus/Grafana processes.
+  Supabase, Clerk, Qdrant, and hosted model providers are configured externally.
+  PDF indexing checkpoints are local files; the current Blueprint does not
+  provision a persistent checkpoint disk.
+
+See [the detailed architecture notes](.github/ARCHITECTURE.md),
+[backend setup and operations](server/README.md), and
+[frontend/backend integration](client/INTEGRATION.md) for implementation and
+operational details.
 
 ## Using Magnify
 
-1. Open the deployed web app and sign in through Clerk.
-2. Create a project for a research topic or document collection. Projects keep their PDFs and conversations together.
-3. Upload PDF files. By default, each PDF must be **smaller than 3 MiB**; a file exactly 3 MiB is rejected. Wait for its processing status to complete before chatting.
-4. Choose a project’s retrieval strategy:
-   - **Vector RAG** searches document passages by embedding similarity.
-   - **Vectorless Index-Tree RAG** builds a project-wide passage hierarchy and uses an LLM to select relevant evidence without vector search.
-5. Create or select a conversation and ask a question about the project’s PDFs. Answers include cited source passages and page references; open a source to inspect its PDF page. The chat initially loads the latest 20 messages; choose **Load previous 20 messages** to browse older history.
-6. Continue the conversation, create additional conversations, or manage the project’s PDFs and details from the project workspace.
+1. Sign in through Clerk and create a project for a research topic or document
+   collection.
+2. Upload PDFs. The default limit is **smaller than 3 MiB**; a file exactly
+   3 MiB is rejected. Wait for indexing to complete before asking questions.
+3. Choose **Vector RAG** or **Vectorless Index-Tree RAG** for that project's
+   chat retrieval.
+4. Create or select a conversation, ask a question, and review the cited source
+   passages and page references in the answer.
 
-## Run Locally
+## Run locally
 
-You need Node.js 20.19 or later, Yarn 1.22.10, and configured Clerk, Supabase,
-Redis, Qdrant, Google Gemini, and Ollama Cloud services. Local env templates
-are available at [`client/.env.example`](client/.env.example) and
-[`server/.env.example`](server/.env.example). Copy them to `.env` in their
-respective directories, configure only the values needed, and keep those files
-untracked. The API and browser limits are `MAX_PDF_SIZE_BYTES` and
-`NEXT_PUBLIC_MAX_PDF_SIZE_BYTES`; both default to 3 MiB.
+Requirements: Node.js 20.19 or later, Yarn 1.22.10, Docker for local Valkey and
+Qdrant, and Poppler (`pdfimages` and `pdftoppm`) for worker-side PDF image
+processing. The production image uses Node.js 22 and includes Poppler.
 
-Start the backend API and worker in separate terminals:
+1. Create `client/.env` and `server/.env` from their respective `.env.example`
+   files. Configure Clerk and the backend destination for the client. Configure
+   the backend with Supabase, Clerk verification/webhook settings, Google
+   Gemini, and Ollama Cloud. Keep secrets only in the server environment and
+   keep both `.env` files untracked.
+2. Install and migrate the backend:
 
-```bash
-cd server
-yarn install --frozen-lockfile
-yarn dev
-```
+   ```bash
+   cd server
+   yarn install --frozen-lockfile
+   yarn migrate
+   ```
 
-```bash
-cd server
-yarn dev:worker
-```
+3. In separate terminals, start the API and worker:
 
-Start the frontend in another terminal:
+   ```bash
+   cd server
+   yarn dev
+   ```
+
+   ```bash
+   cd server
+   yarn dev:worker
+   ```
+
+   These commands start the local Valkey and Qdrant infrastructure. Apply
+   pending Supabase migrations before using the API.
+4. In another terminal, start the frontend:
+
+   ```bash
+   cd client
+   yarn install --frozen-lockfile
+   yarn dev
+   ```
+
+Open <http://localhost:3001>. The local API listens on port `8000`. The backend
+README documents Docker, migrations, environment settings, monitoring, quota
+handling, and operational guidance.
+
+## Checks
+
+Run checks in their package directory:
 
 ```bash
 cd client
-yarn install --frozen-lockfile
-yarn dev
+yarn lint
+yarn typecheck
+yarn build
 ```
 
-Open <http://localhost:3001>. Local backend, database migrations, Docker,
-monitoring, and integration details are documented in
-[`server/README.md`](server/README.md) and
-[`client/INTEGRATION.md`](client/INTEGRATION.md). The Render service blueprint
-is [`render.yaml`](render.yaml).
+```bash
+cd server
+yarn typecheck
+yarn test
+```

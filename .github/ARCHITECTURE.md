@@ -1,173 +1,134 @@
 # Magnify Architecture
 
-## System Map
+The canonical rendered system map is in the root [README](../README.md#architecture).
+This document describes the runtime boundaries and the main ingestion/chat
+flows in more detail.
 
-The Next.js client is a separate application from the NestJS API and worker. The
-client sends GraphQL and REST requests through a Next.js rewrite; the server
-Compose stack does not run the client.
+## Runtime boundaries
 
-```mermaid
-flowchart LR
-  subgraph Web[Browser and Next.js client]
-    UI[App Router UI<br/>Projects, workspace, chat, upload]
-    ClerkUI[Clerk provider and session]
-    GQLClient[GraphQL client<br/>token + query or mutation]
-    RESTClient[REST client<br/>token + multipart PDF]
-    Rewrite[Next.js rewrite<br/>/api/backend/* to NEST_API_URL]
-    UI --> GQLClient
-    UI --> RESTClient
-    ClerkUI -->|session token| GQLClient
-    ClerkUI -->|session token| RESTClient
-    GQLClient --> Rewrite
-    RESTClient --> Rewrite
-  end
+- **Next.js client (`client/`)**: App Router pages and client components provide
+  project, document, conversation, upload, and chat experiences. Clerk supplies
+  session tokens. The browser sends GraphQL and multipart REST requests to
+  `/api/backend/*`; Next.js rewrites them to the configured NestJS API.
+- **NestJS API (`server/src/main.ts`)**: `AppModule` composes the project,
+  document, conversation, auth, database, GraphQL, and observability modules.
+  Apollo exposes the schema-first workspace API at `/graphql`. REST controllers
+  also provide workspace routes and multipart PDF upload; separate health and
+  metrics controllers expose operational routes. A signed Clerk webhook handles
+  account deletion.
+- **Authorization**: `ClerkAuthGuard` verifies RS256 session tokens with the
+  configured Clerk JWKS and makes the token subject the owner identity. Resolvers
+  and services pass that owner ID into project and document operations. The
+  webhook uses Svix signature verification rather than session authentication.
+- **Persistence**: `SupabaseService` uses the server-only service-role key for
+  PostgREST, RPC, and Storage requests. Postgres holds workspace metadata,
+  conversations/messages, and project Index Trees. PDF originals are stored in
+  a private Storage bucket.
+- **Background work**: `UploadService` writes the PDF and pending document row,
+  requests a tree generation, then adds one `document-index` job to BullMQ.
+  Valkey/Redis backs the queue. The separate NestJS worker uses `PdfService` and
+  Poppler to process PDFs without keeping the upload request open.
+- **Retrieval and models**: Gemini creates document and query embeddings.
+  Qdrant stores Vector RAG passages and image-caption vectors. Ollama Cloud
+  captions eligible PDF images and performs chat-time evidence selection and
+  answer generation. Index Tree structure is built by application logic from
+  extracted page text and captions, then persisted in Postgres.
+- **Observability**: the API exports `/metrics`; the worker exports `/metrics`
+  and `/health` on its configured metrics port (default `9464`). Prometheus
+  scrapes both, and Grafana displays the provisioned dashboard when enabled.
 
-  subgraph Api[NestJS API]
-    Apollo[Apollo GraphQL<br/>schema and resolvers]
-    Rest[REST controllers<br/>upload, document, health]
-    Guard[ClerkAuthGuard<br/>verify JWT and owner identity]
-    Domain[Domain services<br/>projects, documents, chat,<br/>conversations]
-    Upload[UploadService]
-    Chat[ChatService<br/>strategy-based retrieval]
-    MetricsAPI[API metrics endpoint<br/>and GraphQL telemetry]
-    Webhook[Clerk user-deleted webhook<br/>Svix signature verification]
-    Rewrite -->|POST /graphql| Apollo
-    Rewrite -->|multipart upload| Rest
-    Apollo --> Guard
-    Guard --> Domain
-    Rest --> Guard
-    Guard --> Upload
-    Domain --> Chat
-    Apollo -. operation logs and metrics .-> MetricsAPI
-  end
-
-  ClerkUI <-->|sign-in and tokens| Clerk[Clerk]
-  Guard -->|JWKS public keys| Clerk
-  Clerk -->|signed user-deleted event| Webhook
-
-  subgraph Data[Persistence and queue]
-    SupabaseDB[(Supabase Postgres<br/>projects, documents, conversations,<br/>messages, project index tree)]
-    SupabaseStorage[(Supabase private PDF storage)]
-    Valkey[(Valkey / Redis<br/>BullMQ queue)]
-    Qdrant[(Qdrant<br/>vector passages and captions)]
-  end
-
-  Domain --> SupabaseDB
-  Upload --> SupabaseDB
-  Upload --> SupabaseStorage
-  Upload -->|file-ready + project-index-tree jobs| Valkey
-  Chat -->|conversation history and index tree| SupabaseDB
-  Chat -->|filtered similarity search| Qdrant
-
-  subgraph Worker[PDF worker process]
-    Consumer[BullMQ consumer<br/>concurrency 4]
-    PDF[PdfService<br/>PDF text and image extraction]
-    Consumer --> PDF
-  end
-  Valkey --> Consumer
-  PDF -->|download source PDF| SupabaseStorage
-  PDF -->|status and generated tree| SupabaseDB
-  PDF -->|embeddings and indexed documents| Qdrant
-
-  CloudOllama[Ollama Cloud<br/>chat, relevance, image captions]
-  Gemini[Google Gemini API<br/>text embeddings]
-  PDF -->|caption images / build tree| CloudOllama
-  PDF -->|embed vector documents| Gemini
-  Chat -->|embed vector query| Gemini
-  Chat -->|select evidence and generate answer| CloudOllama
-
-  subgraph Monitoring[Monitoring]
-    Prom[Prometheus]
-    Grafana[Grafana<br/>RAG overview dashboard]
-  end
-  MetricsAPI -->|API :8000 /metrics| Prom
-  Consumer -->|worker :9464 /metrics| Prom
-  Prom --> Grafana
-```
-
-## Upload Lifecycle
+## PDF indexing lifecycle
 
 ```mermaid
 sequenceDiagram
   actor User
   participant UI as Next.js FileUpload
-  participant Clerk
   participant API as Nest REST / UploadService
-  participant DB as Supabase DB and Storage
+  participant DB as Supabase Postgres and Storage
   participant Queue as BullMQ / Valkey
-  participant Worker as PdfWorker / PdfService
-  participant Vector as Gemini embeddings + Qdrant
-  participant Model as Ollama Cloud
+  participant Worker as Worker / PdfService
+  participant Models as Gemini and Ollama Cloud
+  participant Vector as Qdrant
 
-  User->>UI: Select PDF
-  UI->>Clerk: Get session token
-  UI->>API: Multipart PDF + Bearer token
-  API->>API: Verify token, ownership, PDF signature and size
-  API->>DB: Store PDF, document row (pending)
-  API->>Queue: Enqueue file-ready job
+  User->>UI: Select a PDF
+  UI->>API: Multipart PDF + Clerk session token
+  API->>API: Verify owner, PDF signature, and size limit
+  API->>DB: Store private PDF and pending document row
   API->>DB: Request project-tree generation
-  API->>Queue: Enqueue project-index-tree job
-  API-->>UI: Accepted with documentId and jobId
-  par Vector ingestion job
-    Queue->>Worker: Deliver file-ready job; retry failures
-    Worker->>DB: Read document metadata and update status
-    Worker->>DB: Download PDF from private storage
-    Worker->>Worker: Extract text and discover/render images
-    Worker->>Model: Caption page images
-    Worker->>Vector: Embed and store passages and captions
-    Worker->>DB: Mark document complete or failed
-  and Project-tree rebuild job
-    Queue->>Worker: Deliver project-index-tree job; retry failures
-    Worker->>DB: Load project and all authorized documents
-    Worker->>DB: Download PDFs from private storage
-    Worker->>Worker: Extract passages and discover/render images
-    Worker->>Model: Caption images and organize passages into sections
-    Worker->>DB: Persist generated tree and project/document status
-  end
-  UI->>API: Poll upload/index status using GraphQL
-  API-->>UI: queued, processing, completed, or failed
+  API->>Queue: Enqueue one document-index job (job ID = document ID)
+  API-->>UI: Return documentId and jobId
+  Queue->>Worker: Deliver document-index job
+  Worker->>DB: Confirm document exists and mark processing
+  Worker->>DB: Download source PDF
+  Worker->>Worker: Extract page text; discover and render eligible images
+  Worker->>Models: Caption eligible images
+  Worker->>Models: Embed text passages and image captions
+  Worker->>Vector: Upsert passage vectors
+  Worker->>DB: Atomically merge document tree node and mark complete
+  UI->>API: Poll upload status through GraphQL
+  API-->>UI: Return queued, processing, completed, or failed
 ```
 
-Each upload schedules both a `file-ready` vector-ingestion job and a
-`project-index-tree` rebuild. The project setting controls which index is used
-for chat; it does not make upload indexing mutually exclusive.
+A normal upload creates exactly one `document-index` job. That job shares PDF
+extraction and captions between the Vector and Index Tree products. It stores
+the vector passages in Qdrant and calls a Postgres function to merge the
+document's tree node under a row lock; the document is complete only after both
+indexes are ready. The project-tree generation request records the pending
+generation; it does **not** add a second tree-rebuild job for each upload.
 
-## Chat Lifecycle
+Prepared passages, the document node, and completed embedding batches are
+checkpointed so retries can reuse completed work. Successful completion removes
+the checkpoint. Checkpoint persistence requires storage shared by API and worker;
+local Docker Compose mounts a shared volume, but the Render Blueprint does not
+currently configure a persistent checkpoint disk.
+
+A separate `project-index-tree` job rebuilds the aggregate tree when explicitly
+requested or when document deletion requires maintenance. The selected project
+strategy controls chat retrieval only; it does not skip either index during a
+normal upload.
+
+## Chat lifecycle
 
 ```mermaid
 flowchart TD
-  UI[Chat component] -->|sendMessage mutation + bearer token| API[Apollo GraphQL]
-  API --> Guard[ClerkAuthGuard and owner-scoped resolver]
-  Guard --> Chat[ChatService]
-  Chat --> Project{Project rag_strategy}
+  UI["Chat component"] -->|sendMessage GraphQL mutation| API["Apollo GraphQL"]
+  API --> Guard["ClerkAuthGuard and owner-scoped resolver"]
+  Guard --> Chat["ChatService"]
+  Chat --> Strategy{"Project retrieval strategy"}
 
-  Project -->|vector| Embed[Embed question with Gemini API]
-  Embed --> Search[Qdrant similarity search<br/>filtered by owner and project]
-  Search --> SelectV[Ollama Cloud relevance selection]
-  SelectV --> AnswerV[Ollama Cloud answer generation]
+  Strategy -->|vector| Embed["Gemini query embedding"]
+  Embed --> Search["Qdrant search<br/>owner + project filter"]
+  Search --> VectorSelect["Ollama Cloud evidence selection"]
+  VectorSelect --> VectorAnswer["Ollama Cloud grounded answer"]
 
-  Project -->|index_tree| Tree[Load project tree and authorized docs<br/>from Supabase]
-  Tree --> SelectT[Ollama Cloud section and passage selection]
-  SelectT --> AnswerT[Ollama Cloud answer with evidence citations]
+  Strategy -->|index_tree| LoadTree["Load Index Tree from Supabase"]
+  LoadTree --> Authorize["Restrict tree documents to project documents"]
+  Authorize --> TreeSelect["Ollama Cloud section and passage selection"]
+  TreeSelect --> TreeAnswer["Ollama Cloud grounded answer"]
 
-  AnswerV --> Persist[Load recent conversation history<br/>and save exchange via Supabase RPC]
-  AnswerT --> Persist
-  Persist --> Sources[Resolve source pages and optional<br/>signed preview URLs]
+  VectorAnswer --> Persist["Load recent history and save exchange"]
+  TreeAnswer --> Persist
+  Persist --> Sources["Return excerpts, source pages, optional signed preview"]
   Sources --> UI
+  Persist --> DB[(Supabase Postgres)]
 ```
 
-## Boundaries and Operations
+Both strategies ground answers in retrieved evidence, save user/assistant
+messages and source metadata in the verified conversation, and return source
+pages to the UI. Index-Tree chat does not initialize or query Qdrant; Vector
+chat embeds its question with Gemini and applies owner/project filters in
+Qdrant.
 
-- **Frontend:** `client/` uses Next.js App Router, React, MUI, and Clerk. `backendGraphqlRequest` and `backendRequest` call `/api/backend/*`; `next.config.ts` rewrites those paths to `NEST_API_URL` (default `http://localhost:8000`). Query results are cached in memory per Clerk user and invalidated by tags after mutations.
-- **API:** `server/src/app.module.ts` composes feature modules. Apollo serves the schema-first API at `/graphql`; workspace resolvers and REST document routes use `ClerkAuthGuard`. Clerk user deletion arrives separately through a signed Svix webhook.
-- **Identity and tenancy:** The API verifies Clerk RS256 bearer tokens against the configured JWKS endpoint. Resolvers pass the verified Clerk subject as `ownerId`; service/database queries scope user-owned rows by that ID.
-- **Persistence:** `SupabaseService` calls Supabase PostgREST and Storage using the backend service-role key. PDFs remain in a private bucket; project data, conversations, messages, and the index-tree record live in Postgres.
-- **Background work:** `UploadService` writes the PDF and metadata before enqueueing jobs. Valkey backs BullMQ. The separate worker extracts PDFs (including Poppler image discovery/rendering), updates status/progress, and writes Qdrant vectors and/or the Supabase project tree. Queue jobs retry with exponential backoff.
-- **RAG:** Vector chat embeds a question through Gemini and searches Qdrant with owner/project filters; index-tree chat selects evidence from the stored semantic hierarchy. Both paths use Ollama Cloud for relevance/answer generation, include recent conversation history, persist the exchange, and return source metadata.
-- **Monitoring:** Prometheus scrapes API `/metrics` and the worker's internal `:9464/metrics`; Grafana serves the provisioned dashboard on host port `3003`. The server Compose stack runs Valkey and Qdrant; Supabase, Clerk, and Ollama Cloud are external services.
+## Deployment modes
 
-## Observability
+- `server/docker-compose.yml` starts the API, worker, Valkey, Qdrant,
+  Prometheus, and Grafana. The Next.js app is run separately from `client/`.
+- `server/docker-compose.infra.yml` starts only Valkey and Qdrant for local API
+  and worker development.
+- `render.yaml` defines one public web service. Its container starts the
+  Next.js frontend, API, worker, local Redis when `REDIS_URL` is local, and
+  Prometheus/Grafana only when their admin credentials are configured.
+  Supabase, Clerk, Qdrant, and hosted model providers are external services.
 
-Prometheus metrics use bounded labels for RAG strategy, dependency/system, operation, stage, and outcome. The RAG dashboard reports p50/p95/p99 for request, model, dependency, worker, and ingestion latency; queue wait is separate from worker processing. Shared telemetry covers PostgREST/Storage calls and payload bytes, PDF transfer bytes, retries, errors, and Node CPU/RSS. Vector-only metrics cover Gemini embedding batches and estimated input tokens, Qdrant initialization/search/upserts, and raw retrieval counts. Index Tree metrics cover generation stages, node counts, serialized tree size, candidates, model calls, and answer-context bytes; this path does not initialize embeddings or Qdrant.
-
-API requests receive `x-trace-id` and `x-request-id`; upload jobs carry those IDs plus document/job IDs into worker context and outbound dependency headers. Structured logs contain identifiers, stage/operation, timing, outcome, and error type, but not prompts, document excerpts, PDF content, or credentials. Database request bytes are measured from serialized bodies; response bytes use HTTP `Content-Length` when supplied, avoiding a second serialization of large result trees. PDF transfer bytes are not equivalent to provider-allocated storage, and this application currently cannot report actual Supabase or Qdrant allocated storage without provider-level usage APIs.
+See the [backend README](../server/README.md) for migrations, environment
+settings, local observability, and operational behavior.
