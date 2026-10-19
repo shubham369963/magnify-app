@@ -28,11 +28,15 @@ flows in more detail.
   requests a tree generation, then adds one `document-index` job to BullMQ.
   Valkey/Redis backs the queue. The separate NestJS worker uses `PdfService` and
   Poppler to process PDFs without keeping the upload request open.
-- **Retrieval and models**: Gemini creates document and query embeddings.
-  Qdrant stores Vector RAG passages and image-caption vectors. Ollama Cloud
-  captions eligible PDF images and performs chat-time evidence selection and
-  answer generation. Index Tree structure is built by application logic from
-  extracted page text and captions, then persisted in Postgres.
+- **Retrieval and models**: Gemini creates document and Vector query embeddings.
+  Qdrant stores Vector RAG passages and image-caption vectors. Cohere Rerank v2
+  ranks chat-time passage candidates for both strategies. Vector chat reranks
+  Qdrant's top 10 results and sends the best 5 to answer generation. Index Tree
+  chat reranks all authorized, deduplicated passage nodes without a lexical
+  shortlist, then selects up to `RAG_TREE_MAX_EVIDENCE` passages (default 8).
+  Ollama Cloud captions eligible PDF images and generates grounded answers.
+  Index Tree structure is built by application logic from extracted page text
+  and captions, then persisted in Postgres.
 - **Observability**: the API exports `/metrics`; the worker exports `/metrics`
   and `/health` on its configured metrics port (default `9464`). Prometheus
   scrapes both, and Grafana displays the provisioned dashboard when enabled.
@@ -98,26 +102,33 @@ flowchart TD
 
   Strategy -->|vector| Embed["Gemini query embedding"]
   Embed --> Search["Qdrant search<br/>owner + project filter"]
-  Search --> VectorSelect["Ollama Cloud evidence selection"]
-  VectorSelect --> VectorAnswer["Ollama Cloud grounded answer"]
+  Search --> VectorRerank["Cohere rerank top 10<br/>select top 5"]
+  VectorRerank --> VectorAnswer["Ollama Cloud grounded answer"]
 
   Strategy -->|index_tree| LoadTree["Load Index Tree from Supabase"]
   LoadTree --> Authorize["Restrict tree documents to project documents"]
-  Authorize --> TreeSelect["Ollama Cloud section and passage selection"]
-  TreeSelect --> TreeAnswer["Ollama Cloud grounded answer"]
+  Authorize --> TreeCandidates["Collect and deduplicate passage nodes"]
+  TreeCandidates --> TreeRerank["Cohere rerank all passages<br/>select top RAG_TREE_MAX_EVIDENCE"]
+  TreeRerank --> TreeAnswer["Ollama Cloud grounded answer"]
 
-  VectorAnswer --> Persist["Load recent history and save exchange"]
-  TreeAnswer --> Persist
+  VectorAnswer --> Validate["Verify cited IDs and exact excerpts"]
+  TreeAnswer --> Validate
+  Validate --> Persist["Load recent history and save exchange"]
   Persist --> Sources["Return excerpts, source pages, optional signed preview"]
   Sources --> UI
   Persist --> DB[(Supabase Postgres)]
 ```
 
-Both strategies ground answers in retrieved evidence, save user/assistant
-messages and source metadata in the verified conversation, and return source
-pages to the UI. Index-Tree chat does not initialize or query Qdrant; Vector
-chat embeds its question with Gemini and applies owner/project filters in
-Qdrant.
+Both strategies use Cohere Rerank v2 to prioritize passage evidence, then use
+the configured Ollama Cloud chat model to generate a grounded answer. The API
+validates cited evidence IDs and exact excerpts before saving user/assistant
+messages and source metadata in the verified conversation and returning source
+pages to the UI. Index-Tree chat does not embed its question or query Qdrant;
+Vector chat embeds its question with Gemini and applies owner/project filters
+in Qdrant. Index-Tree reranking considers authorized passage content directly,
+so a passage is not excluded because its heading or summary lacks the question's
+keywords. Large trees are sent to Cohere in batches of up to 1,000 passages,
+then the highest-ranked results are combined.
 
 ## Deployment modes
 

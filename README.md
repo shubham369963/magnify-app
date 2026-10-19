@@ -74,11 +74,13 @@ flowchart LR
   Chat --> Qdrant
 
   Gemini["Google Gemini<br/>text embeddings"]
-  Ollama["Ollama Cloud<br/>image captions · evidence selection · answers"]
+  Ollama["Ollama Cloud<br/>image captions · grounded answers"]
+  Cohere["Cohere Rerank v2<br/>chat evidence ranking"]
   Worker -->|embed passages| Gemini
   Chat -->|embed vector query| Gemini
   Worker -->|caption eligible PDF images| Ollama
-  Chat -->|select evidence and generate answer| Ollama
+  Chat -->|rerank candidate passages| Cohere
+  Chat -->|generate grounded answer| Ollama
 
   subgraph Monitoring["Optional monitoring"]
     Prometheus[Prometheus]
@@ -134,17 +136,22 @@ flowchart LR
 The project's RAG strategy affects **chat retrieval**, not ingestion:
 
 - **Vector RAG** embeds the question with Gemini, searches Qdrant with
-  owner/project filters, and uses Ollama Cloud to select evidence and generate
-  a grounded answer.
+  owner/project filters, reranks the top 10 results with Cohere, and passes the
+  best 5 passages to Ollama Cloud for grounded answer generation.
 - **Vectorless Index-Tree RAG** loads the project's stored tree from Postgres
-  and uses Ollama Cloud to navigate sections/passages and answer from selected
-  evidence. It does not query Qdrant for passage retrieval.
+  and reranks all authorized, deduplicated passage nodes with Cohere, without
+  requiring exact lexical matches in section titles or summaries. Up to
+  `RAG_TREE_MAX_EVIDENCE` passages (default 8) are sent to Ollama Cloud for
+  grounded answer generation; incomplete passages can include linked neighbors.
+  It does not embed the question or query Qdrant for passage retrieval.
 
-When evidence is available, both paths use recent conversation history, persist
-the exchange, and return source excerpts and page metadata. Image-caption
-sources can include a short-lived signed PDF preview URL. Since every upload
-builds both indexes, Vectorless mode still requires the configured embedding
-provider during ingestion.
+Both paths use recent conversation history, but factual claims must be
+supported by selected passages. The API verifies cited evidence IDs and exact
+quoted excerpts against the original content before persisting the exchange and
+returning source excerpts and page metadata. Image-caption sources can include
+a short-lived signed PDF preview URL. Since every upload builds both indexes,
+Vectorless mode still requires the configured embedding provider during
+ingestion.
 
 ### Runtime topology
 
@@ -153,8 +160,8 @@ run them differently:
 
 - **Local development:** run the frontend separately. `server/` starts the API
   and worker as separate processes; its infrastructure Compose file supplies
-  Valkey and Qdrant. Supabase, Clerk, Gemini, and Ollama Cloud remain configured
-  services.
+  Valkey and Qdrant. Supabase, Clerk, Gemini, Ollama Cloud, and Cohere remain
+  configured services.
 - **Backend Docker Compose:** runs API, worker, Valkey, Qdrant, Prometheus, and
   Grafana. It does not run the Next.js frontend.
 - **Render Blueprint:** builds one public web service containing the Next.js
@@ -188,8 +195,8 @@ processing. The production image uses Node.js 22 and includes Poppler.
 1. Create `client/.env` and `server/.env` from their respective `.env.example`
    files. Configure Clerk and the backend destination for the client. Configure
    the backend with Supabase, Clerk verification/webhook settings, Google
-   Gemini, and Ollama Cloud. Keep secrets only in the server environment and
-   keep both `.env` files untracked.
+   Gemini, Ollama Cloud, and Cohere Rerank. Keep secrets only in the server
+   environment and keep both `.env` files untracked.
 2. Install and migrate the backend:
 
    ```bash

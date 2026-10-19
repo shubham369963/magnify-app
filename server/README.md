@@ -99,9 +99,9 @@ Local dependency ports are Valkey 6381 and Qdrant 6335. Dockerized processes use
 service names on the container network instead. Update existing local
 environment files to match `.env.example` if they still point at the original
 root Compose services.
-Set `OLLAMA_API_KEY` and `GOOGLE_API_KEY` in `server/.env`; never expose them
-with a `NEXT_PUBLIC_` variable or commit them. Hosted model usage is subject to
-current quotas and terms.
+Set `OLLAMA_API_KEY`, `GOOGLE_API_KEY`, and `COHERE_API_KEY` in `server/.env`;
+never expose them with a `NEXT_PUBLIC_` variable or commit them. Hosted model
+usage is subject to current quotas and terms.
 
 ### PDF processing throughput
 
@@ -328,19 +328,20 @@ In Docker, run `docker compose exec api node dist/database/reindex.js` after dep
 new image while the worker is running. Reindexing replaces each document's old
 vectors with its new text chunks and image captions and merges its document node
 into the project Index Tree using the same extraction and captions.
-Chat ignores retrieval matches below `RAG_MIN_RELEVANCE_SCORE` (default `0.45`, for Qdrant cosine similarity) before its evidence relevance check. It replies that the PDFs do not contain the answer when no relevant chunks are found. Adjust this value in the server environment if relevant chunks are being filtered out.
-
-Page Index Tree retrieval scans authorized passage descendants across all
-sections, including unclassified content, then combines lexical ranking with
-bounded document-wide candidate exploration before Ollama relevance selection.
-Weak lexical matches use a deterministic distributed fallback; selected context
-is restored to document reading order, and only incomplete or explicitly split
-passages expand to linked neighbors. Answers are grounded in original extracted
-passage text and retain page and evidence references. `RAG_TREE_MAX_CANDIDATES_PER_CALL`,
-`RAG_TREE_MAX_EVIDENCE`, and `RAG_TREE_MAX_CONTEXT_EXPANSIONS` bound selector
-candidates, returned evidence, and adjacent-context expansion. Defaults are 20,
-8, and 2 respectively; context expansion can be disabled by setting its limit
-to 0. These settings apply only to Page Index Tree chat.
+Both Vector and Page Index Tree chat use the
+[Cohere Rerank v2 API](https://docs.cohere.com/reference/rerank)
+(`rerank-v4.0-pro` by default) to order evidence passages by relevance to the
+full question. Vector reranks Qdrant's top 10 results and sends the best 5 to
+answer generation.
+Page Index Tree reranks all authorized, deduplicated passage nodes, without
+requiring lexical matches in the section title or summary, and sends the best
+`RAG_TREE_MAX_EVIDENCE` passages (default 8). Cohere accepts up to 1,000
+documents per request; larger trees are reranked in batches and the best results
+are combined. Only incomplete or explicitly split selected passages expand to
+linked neighbors, bounded by `RAG_TREE_MAX_CONTEXT_EXPANSIONS` (default 4; set
+to 0 to disable). Answers are still grounded and citations are verified against
+the original passage text. Set `COHERE_API_KEY` in the server environment; chat
+requests fail explicitly if Cohere is unavailable or not configured.
 
 The old `/upload/pdf` endpoint is replaced with project-scoped upload. `GET /chat`
 requires both `projectId` and `conversationId`. The frontend must send the Clerk

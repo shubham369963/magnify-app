@@ -26,13 +26,31 @@ afterEach(() => {
   }
 });
 
-function createChatService(conversations, documents, projects, supabase) {
+function createChatService(conversations, documents, projects, supabase, rerankerOverride) {
   conversations.getInVerifiedProject = conversations.get;
   conversations.recentMessagesInVerifiedConversation =
     conversations.recentMessages;
   conversations.saveExchangeInVerifiedConversation = conversations.saveExchange;
   documents.listInVerifiedProject = documents.list;
-  return new ChatService(conversations, documents, projects, supabase);
+  const reranker = rerankerOverride ?? {
+    rerank: async (query, documents, topN) => {
+      const terms = [...new Set(query.toLowerCase().match(/[a-z0-9]+/gu) ?? [])];
+      const ranked = documents.map((document, index) => {
+        const parsed = JSON.parse(document);
+        const content = [
+          parsed.section,
+          parsed.content,
+        ].filter((value) => typeof value === "string").join(" ").toLowerCase();
+        const contentTerms = new Set(content.match(/[a-z0-9]+/gu) ?? []);
+        const score = terms.filter((term) => contentTerms.has(term)).length;
+        return { index, relevanceScore: score };
+      }).filter(({ relevanceScore }) => relevanceScore > 0);
+      return (ranked.length ? ranked : documents.length ? [{ index: 0, relevanceScore: 0 }] : [])
+        .sort((left, right) => right.relevanceScore - left.relevanceScore || left.index - right.index)
+        .slice(0, topN);
+    },
+  };
+  return new ChatService(conversations, documents, projects, supabase, reranker);
 }
 
 test("project index-tree chat answers from authorized leaf passages without vector search", async () => {
@@ -93,17 +111,15 @@ test("project index-tree chat answers from authorized leaf passages without vect
       modelCall += 1;
       const payload = JSON.parse(messages.at(-1).content);
       return {
-        content: Array.isArray(payload.evidence)
-          ? JSON.stringify({
-              answer: "The measured outcome increased by 42 percent.",
-              sources: [
-                {
-                  id: "Epassage-1",
-                  excerpt: "The measured outcome increased by 42 percent.",
-                },
-              ],
-            })
-          : '{"relevant_ids":["D1"]}',
+        content: JSON.stringify({
+          answer: "The measured outcome increased by 42 percent.",
+          sources: [
+            {
+              id: "Epassage-1",
+              excerpt: "The measured outcome increased by 42 percent.",
+            },
+          ],
+        }),
       };
     });
   const vectorSpy = jest.spyOn(QdrantVectorStore, "fromExistingCollection");
@@ -133,7 +149,7 @@ test("project index-tree chat answers from authorized leaf passages without vect
       "The measured outcome increased by 42 percent.",
     );
     assert.equal(response.docs[0].metadata.content_type, "image_caption");
-    assert.equal(modelCall, 2);
+    assert.equal(modelCall, 1);
     assert.equal(vectorSpy.mock.calls.length, 0);
     assert.equal(saved.length, 1);
     assert.equal(saved[0][5].sources[0].document_id, "doc-1");
@@ -206,34 +222,17 @@ test("tree retrieval includes an exact passage in a late section with no matchin
   let selectedPassageIds = [];
   const modelSpy = jest
     .spyOn(ChatOllama.prototype, "invoke")
-    .mockImplementation(async (messages) => {
-      const payload = JSON.parse(messages.at(-1).content);
-      if (Array.isArray(payload.evidence)) {
-        const evidence = payload.evidence[0];
-        return {
-          content: JSON.stringify({
-            answer: "The coefficient is 0.73 W/(m·K).",
-            sources: [
-              {
-                id: evidence.id,
-                excerpt: "thermographic coefficient 0.73 W/(m·K)",
-              },
-            ],
-          }),
-        };
-      }
-      selectedPassageIds = payload.candidates.flatMap((candidate) =>
-        typeof candidate.content === "string" &&
-        candidate.content.includes("thermographic coefficient")
-          ? [candidate.evidence_id]
-          : [],
-      );
-      return {
-        content: JSON.stringify({
-          relevant_ids: selectedPassageIds.length ? ["D1"] : ["D1", "D2", "D3"],
-        }),
-      };
-    });
+    .mockImplementation(async () => ({
+      content: JSON.stringify({
+        answer: "The coefficient is 0.73 W/(m·K).",
+        sources: [
+          {
+            id: "Epassage-7",
+            excerpt: "thermographic coefficient 0.73 W/(m·K)",
+          },
+        ],
+      }),
+    }));
   const originalApiKey = process.env.OLLAMA_API_KEY;
   process.env.OLLAMA_API_KEY = "test-key";
   try {
@@ -242,6 +241,18 @@ test("tree retrieval includes an exact passage in a late section with no matchin
       documents,
       projects,
       supabase,
+      {
+        rerank: async (_query, serializedCandidates, topN) => {
+          selectedPassageIds = serializedCandidates.flatMap((candidate, index) =>
+            candidate.includes("thermographic coefficient")
+              ? [`Epassage-${index + 1}`]
+              : [],
+          );
+          return selectedPassageIds.length && topN
+            ? [{ index: Number(selectedPassageIds[0].split("-").at(-1)) - 1, relevanceScore: 0.99 }]
+            : [];
+        },
+      },
     );
     const response = await service.chat(
       "What thermographic coefficient is reported for alloy Z-17?",
@@ -271,7 +282,7 @@ test("tree retrieval includes an exact passage in a late section with no matchin
   }
 });
 
-test("bounded fallback reaches a late passage when semantic relevance has no lexical overlap", async () => {
+test("Cohere reranking can select a late passage without a matching heading or lexical shortlist", async () => {
   const sections = Array.from({ length: 25 }, (_unused, index) => ({
     id: `section-${index + 1}`,
     type: "section",
@@ -317,36 +328,21 @@ test("bounded fallback reaches a late passage when semantic relevance has no lex
   const supabase = {
     select: async () => [{ status: "completed", tree, error_message: null }],
   };
-  let selectorCandidateCount = 0;
+  let rerankCandidateCount = 0;
   let selectedEvidenceId;
   const modelSpy = jest
     .spyOn(ChatOllama.prototype, "invoke")
-    .mockImplementation(async (messages) => {
-      const payload = JSON.parse(messages.at(-1).content);
-      if (Array.isArray(payload.evidence)) {
-        const evidence = payload.evidence[0];
-        return {
-          content: JSON.stringify({
-            answer: "Insulation reduces heat loss by slowing energy transfer.",
-            sources: [
-              {
-                id: evidence.id,
-                excerpt: "slows energy transfer by limiting molecular movement",
-              },
-            ],
-          }),
-        };
-      }
-      selectorCandidateCount = payload.candidates.length;
-      const targetIndex = payload.candidates.findIndex((candidate) =>
-        candidate.content.includes("thermal barrier"),
-      );
-      if (targetIndex < 0) return { content: '{"relevant_ids":[]}' };
-      selectedEvidenceId = payload.candidates[targetIndex].evidence_id;
-      return {
-        content: JSON.stringify({ relevant_ids: [`D${targetIndex + 1}`] }),
-      };
-    });
+    .mockImplementation(async () => ({
+      content: JSON.stringify({
+        answer: "Insulation reduces heat loss by slowing energy transfer.",
+        sources: [
+          {
+            id: "Epassage-25",
+            excerpt: "slows energy transfer by limiting molecular movement",
+          },
+        ],
+      }),
+    }));
   const originalApiKey = process.env.OLLAMA_API_KEY;
   process.env.OLLAMA_API_KEY = "test-key";
   try {
@@ -355,6 +351,16 @@ test("bounded fallback reaches a late passage when semantic relevance has no lex
       documents,
       projects,
       supabase,
+      {
+        rerank: async (_query, candidates) => {
+          rerankCandidateCount = candidates.length;
+          const targetIndex = candidates.findIndex((candidate) =>
+            candidate.includes("thermal barrier"),
+          );
+          selectedEvidenceId = `Epassage-${targetIndex + 1}`;
+          return [{ index: targetIndex, relevanceScore: 0.99 }];
+        },
+      },
     );
     const response = await service.chat(
       "How does insulation limit heat loss?",
@@ -364,7 +370,7 @@ test("bounded fallback reaches a late passage when semantic relevance has no lex
     );
     assert.match(response.message, /slowing energy transfer/u);
     assert.equal(response.docs[0].metadata.loc.pageNumber, 25);
-    assert.equal(selectorCandidateCount, 20);
+    assert.equal(rerankCandidateCount, 25);
     assert.equal(selectedEvidenceId, "Epassage-25");
   } finally {
     modelSpy.mockRestore();
@@ -373,7 +379,7 @@ test("bounded fallback reaches a late passage when semantic relevance has no lex
   }
 });
 
-test("lexical evidence survives selector timeouts and malformed output", async () => {
+test("Cohere reranking failures are surfaced instead of silently using lexical matches", async () => {
   const tree = {
     id: "project-1",
     type: "root",
@@ -416,47 +422,27 @@ test("lexical evidence survives selector timeouts and malformed output", async (
   const supabase = {
     select: async () => [{ status: "completed", tree, error_message: null }],
   };
-  let selectorBehavior = "timeout";
-  const modelSpy = jest
-    .spyOn(ChatOllama.prototype, "invoke")
-    .mockImplementation(async (messages) => {
-      const payload = JSON.parse(messages.at(-1).content);
-      if (Array.isArray(payload.evidence)) {
-        const evidence = payload.evidence[0];
-        return {
-          content: JSON.stringify({
-            answer: "Record AC-12 was issued on 2025-04-03.",
-            sources: [{ id: evidence.id, excerpt: "2025-04-03" }],
-          }),
-        };
-      }
-      if (selectorBehavior === "timeout") throw new Error("selector timed out");
-      return { content: "not valid JSON" };
-    });
-  const originalApiKey = process.env.OLLAMA_API_KEY;
-  process.env.OLLAMA_API_KEY = "test-key";
+  const modelSpy = jest.spyOn(ChatOllama.prototype, "invoke");
+  const service = createChatService(
+    conversations,
+    documents,
+    projects,
+    supabase,
+    { rerank: async () => { throw new Error("Cohere is unavailable"); } },
+  );
   try {
-    const service = createChatService(
-      conversations,
-      documents,
-      projects,
-      supabase,
-    );
-    for (const behavior of ["timeout", "malformed"]) {
-      selectorBehavior = behavior;
-      const response = await service.chat(
+    await assert.rejects(
+      service.chat(
         "When was record AC-12 issued?",
         "user-1",
         "project-1",
         "conversation-1",
-      );
-      assert.match(response.message, /2025-04-03/u);
-      assert.equal(response.docs[0].metadata.loc.pageNumber, 4);
-    }
+      ),
+      /Cohere is unavailable/u,
+    );
+    assert.equal(modelSpy.mock.calls.length, 0);
   } finally {
     modelSpy.mockRestore();
-    if (originalApiKey === undefined) delete process.env.OLLAMA_API_KEY;
-    else process.env.OLLAMA_API_KEY = originalApiKey;
   }
 });
 
@@ -603,27 +589,12 @@ test("legacy persisted flat-node trees expose leaf evidence to answer generation
   let passageCandidates;
   const modelSpy = jest
     .spyOn(ChatOllama.prototype, "invoke")
-    .mockImplementation(async (messages) => {
-      const payload = JSON.parse(messages.at(-1).content);
-      if (Array.isArray(payload.evidence)) {
-        const evidence = payload.evidence[0];
-        return {
-          content: JSON.stringify({
-            answer: "The grade point average is 8.30/10.",
-            sources: [{ id: evidence.id, excerpt: "8.30/10" }],
-          }),
-        };
-      }
-      if (
-        payload.candidates.some(
-          (candidate) => typeof candidate.content === "string",
-        )
-      ) {
-        passageCandidates = payload.candidates;
-        return { content: '{"relevant_ids":["D1"]}' };
-      }
-      return { content: '{"relevant_ids":[]}' };
-    });
+    .mockImplementation(async () => ({
+      content: JSON.stringify({
+        answer: "The grade point average is 8.30/10.",
+        sources: [{ id: "Eleaf-1", excerpt: "8.30/10" }],
+      }),
+    }));
   const originalApiKey = process.env.OLLAMA_API_KEY;
   process.env.OLLAMA_API_KEY = "test-key";
   try {
@@ -632,6 +603,12 @@ test("legacy persisted flat-node trees expose leaf evidence to answer generation
       documents,
       projects,
       supabase,
+      {
+        rerank: async (_query, candidates) => {
+          passageCandidates = candidates.map((candidate) => JSON.parse(candidate));
+          return [{ index: 0, relevanceScore: 1 }];
+        },
+      },
     );
     const response = await service.chat(
       "What is the grade point average?",
@@ -703,19 +680,9 @@ test("tree chat returns unavailable when fallback context cannot ground the answ
   let answerCalls = 0;
   const modelSpy = jest
     .spyOn(ChatOllama.prototype, "invoke")
-    .mockImplementation(async (messages) => {
-      const payload = JSON.parse(messages.at(-1).content);
-      if (Array.isArray(payload.evidence)) {
-        answerCalls += 1;
-        return { content: '{"answer":"unsupported","sources":[]}' };
-      }
-      return {
-        content: payload.candidates.some(
-          (candidate) => typeof candidate.content === "string",
-        )
-          ? '{"relevant_ids":[]}'
-          : '{"relevant_ids":["D1"]}',
-      };
+    .mockImplementation(async () => {
+      answerCalls += 1;
+      return { content: '{"answer":"unsupported","sources":[]}' };
     });
   const originalApiKey = process.env.OLLAMA_API_KEY;
   process.env.OLLAMA_API_KEY = "test-key";
@@ -847,14 +814,6 @@ test("tree chat covers multiple sections and expands an incomplete cross-page pa
     .mockImplementation(async (messages) => {
       modelCall += 1;
       const payload = JSON.parse(messages.at(-1).content);
-      if (!Array.isArray(payload.evidence)) {
-        const relevantIds = payload.candidates.flatMap((candidate, index) =>
-          /outcome|cost/i.test(JSON.stringify(candidate))
-            ? [`D${index + 1}`]
-            : [],
-        );
-        return { content: JSON.stringify({ relevant_ids: relevantIds }) };
-      }
       answerPayload = payload;
       return {
         content: JSON.stringify({
@@ -900,7 +859,7 @@ test("tree chat covers multiple sections and expands an incomplete cross-page pa
         (item) => !("page" in item) && !("section_title" in item),
       ),
     );
-    assert.equal(modelCall, 2);
+    assert.equal(modelCall, 1);
     assert.equal(vectorSpy.mock.calls.length, 0);
   } finally {
     modelSpy.mockRestore();
@@ -1022,15 +981,6 @@ test("tree chat excludes unrelated sections and does not use section metadata as
     .spyOn(ChatOllama.prototype, "invoke")
     .mockImplementation(async (messages) => {
       const payload = JSON.parse(messages.at(-1).content);
-      if (!Array.isArray(payload.evidence)) {
-        const relevantIds = payload.candidates.flatMap((candidate, index) =>
-          typeof candidate.content === "string" &&
-          candidate.content.includes("Rajarambapu")
-            ? [`D${index + 1}`]
-            : [],
-        );
-        return { content: JSON.stringify({ relevant_ids: relevantIds }) };
-      }
       answerPayload = payload;
       const evidence = payload.evidence.find((item) =>
         item.content.includes("Rajarambapu"),
@@ -1141,6 +1091,8 @@ test("vector chat returns full evidence and its matched excerpt separately", asy
     });
   const originalApiKey = process.env.OLLAMA_API_KEY;
   const originalGoogleApiKey = process.env.GOOGLE_API_KEY;
+  let rerankedDocuments;
+  let rerankLimit;
   process.env.OLLAMA_API_KEY = "test-key";
   process.env.GOOGLE_API_KEY = "test-key";
   try {
@@ -1149,6 +1101,13 @@ test("vector chat returns full evidence and its matched excerpt separately", asy
       documents,
       projects,
       supabase,
+      {
+        rerank: async (_query, candidates, topN) => {
+          rerankedDocuments = candidates;
+          rerankLimit = topN;
+          return [{ index: 0, relevanceScore: 0.99 }];
+        },
+      },
     );
     const response = await service.chat(
       "What is the college name?",
@@ -1174,6 +1133,8 @@ test("vector chat returns full evidence and its matched excerpt separately", asy
       saved[0][5].sources[0].excerpt,
       "Rajarambapu Institute of Technology.",
     );
+    assert.equal(rerankLimit, 5);
+    assert.equal(JSON.parse(rerankedDocuments[0]).content, originalContent);
   } finally {
     modelSpy.mockRestore();
     qdrantSpy.mockRestore();

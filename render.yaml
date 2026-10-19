@@ -32,6 +32,8 @@ services:
         sync: false
       - key: OLLAMA_API_KEY
         sync: false
+      - key: COHERE_API_KEY
+        sync: false
       - key: CLERK_JWKS_URL
         sync: false
       - key: CLERK_WEBHOOK_SIGNING_SECRET
@@ -79,16 +81,12 @@ envVarGroups:
         value: gemma4:31b
       - key: OLLAMA_CLOUD_VISION_MODEL
         value: gemma4:31b
-      - key: RAG_MIN_RELEVANCE_SCORE
-        value: "0.45"
-      - key: RAG_TREE_MAX_CANDIDATES_PER_CALL
-        value: "20"
+      - key: COHERE_RERANK_MODEL
+        value: rerank-v4.0-pro
       - key: RAG_TREE_MAX_EVIDENCE
-        value: "8"
+        value: "10"
       - key: RAG_TREE_MAX_CONTEXT_EXPANSIONS
         value: "4"
-      - key: RAG_TREE_SELECTOR_TOKEN_BUDGET
-        value: "12000"
       # Keep the embedding model and dimensions compatible with stored Qdrant vectors.
       - key: GEMINI_EMBEDDING_MODEL
         value: gemini-embedding-2
